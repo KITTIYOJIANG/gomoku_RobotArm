@@ -88,22 +88,23 @@ def draw_board_overlay(
         cv2.LINE_AA,
     )
 
-    draw_row = target_row if selected_row is None else int(selected_row)
-    draw_col = target_col if selected_col is None else int(selected_col)
-    if 0 <= draw_row < board_size and 0 <= draw_col < board_size:
-        target_point = tuple(np.rint(grid[draw_row, draw_col]).astype(int))
-        cv2.circle(output, target_point, 14, (0, 0, 255), 3, cv2.LINE_AA)
-        cv2.circle(output, target_point, 5, (0, 255, 255), -1, cv2.LINE_AA)
-        cv2.putText(
-            output,
-            f"TARGET P({draw_row},{draw_col})",
-            _text_origin(output, target_point, 16, 18),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (0, 255, 255),
-            2,
-            cv2.LINE_AA,
-        )
+    if selected_row is not None and selected_col is not None:
+        draw_row = int(selected_row)
+        draw_col = int(selected_col)
+        if 0 <= draw_row < board_size and 0 <= draw_col < board_size:
+            target_point = tuple(np.rint(grid[draw_row, draw_col]).astype(int))
+            cv2.circle(output, target_point, 14, (0, 0, 255), 3, cv2.LINE_AA)
+            cv2.circle(output, target_point, 5, (0, 255, 255), -1, cv2.LINE_AA)
+            cv2.putText(
+                output,
+                f"TARGET P({draw_row},{draw_col})",
+                _text_origin(output, target_point, 16, 18),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
     if show_corners:
         _draw_board_corners_inplace(
             output,
@@ -243,3 +244,28 @@ def _outlined_text(
 ) -> None:
     cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, (0, 0, 0), 4, cv2.LINE_AA)
     cv2.putText(image, text, origin, cv2.FONT_HERSHEY_SIMPLEX, scale, color, 2, cv2.LINE_AA)
+
+
+def draw_piece_matrix(
+    display_frame: np.ndarray,
+    *,
+    homography: np.ndarray,
+    board_matrix: object,
+    board_size: int = 15,
+) -> np.ndarray:
+    """Overlay recognized black/white stones on intersections."""
+    output = display_frame
+    grid = grid_points_from_homography(np.asarray(homography, dtype=np.float32), board_size)
+    for row_index, row in enumerate(board_matrix):
+        for col_index, value in enumerate(row):
+            if int(value) == 0:
+                continue
+            point = tuple(np.rint(grid[row_index, col_index]).astype(int))
+            if int(value) == 1:  # black
+                cv2.circle(output, point, 10, (40, 40, 40), -1, cv2.LINE_AA)
+                cv2.circle(output, point, 10, (0, 255, 0), 2, cv2.LINE_AA)
+            elif int(value) == 2:  # white
+                cv2.circle(output, point, 10, (240, 240, 240), -1, cv2.LINE_AA)
+                cv2.circle(output, point, 10, (255, 128, 0), 2, cv2.LINE_AA)
+    return output
+

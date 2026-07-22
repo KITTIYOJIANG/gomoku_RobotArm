@@ -12,7 +12,7 @@ from .board_tracker import BoardTrackSnapshot, BoardTrackState, BoardTracker
 from .calibration import load_camera_intrinsics
 from .localization import AprilTagBoardLayout, BoardLocalizationPipeline
 from .localization.models import LocalizationUpdate
-from .overlay import draw_board_overlay
+from .overlay import draw_board_overlay, draw_piece_matrix
 from .piece_recognizer import PieceRecognitionResult, PieceRecognizer
 
 
@@ -186,6 +186,8 @@ class BoardLocator:
                 target_row=self.target_row,
                 target_col=self.target_col,
                 target_name=self.target_name,
+                selected_row=self._selected_row,
+                selected_col=self._selected_col,
                 show_corners=self._show_corners,
                 show_corner_coordinates=self._show_corner_coordinates,
             )
@@ -198,6 +200,12 @@ class BoardLocator:
                 board_size=self.board_size,
             )
             LOGGER.info("PIECE RECOGNITION %s", piece_result.summary)
+            display_frame = draw_piece_matrix(
+                display_frame,
+                homography=track.homography,
+                board_matrix=piece_result.board_matrix,
+                board_size=self.board_size,
+            )
 
         reason = self._reason(track, detection_error)
         observation = self._observation(display_frame, track, reason)
