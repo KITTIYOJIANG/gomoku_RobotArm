@@ -1,0 +1,116 @@
+{
+  "version": "1.0",
+  "anchors": {
+    "3,7": {
+      "row": 3,
+      "col": 7,
+      "label": "CENTER_UP",
+      "reference_anchor": "7,7",
+      "candidate_pwm": {
+        "000": 1560,
+        "001": 1170,
+        "002": 990,
+        "003": 1170,
+        "004": 1500
+      },
+      "status": "COMPLETED",
+      "user_verified": true,
+      "verified_runs": 6,
+      "last_test_result": "SAFE_OK",
+      "safe_return_completed": true,
+      "emergency_stop": false,
+      "notes": "",
+      "updated_at": "2026-07-22T23:20:29",
+      "history": [
+        {
+          "at": "2026-07-22T23:19:19",
+          "pwm": {
+            "000": 1560,
+            "001": 1170,
+            "002": 990,
+            "003": 1170,
+            "004": 1500
+          },
+          "status": "DRAFT"
+        },
+        {
+          "at": "2026-07-22T23:20:29",
+          "pwm": {
+            "000": 1560,
+            "001": 1170,
+            "002": 990,
+            "003": 1170,
+            "004": 1500
+          },
+          "status": "DRAFT"
+        }
+      ]
+    },
+    "11,7": {
+      "row": 11,
+      "col": 7,
+      "label": "CENTER_DOWN",
+      "reference_anchor": "7,7",
+      "candidate_pwm": {
+        "000": null,
+        "001": null,
+        "002": null,
+        "003": null,
+        "004": null
+      },
+      "status": "EMPTY",
+      "user_verified": false,
+      "verified_runs": 0,
+      "last_test_result": null,
+      "safe_return_completed": false,
+      "emergency_stop": false,
+      "notes": "",
+      "updated_at": "",
+      "history": []
+    },
+    "7,3": {
+      "row": 7,
+      "col": 3,
+      "label": "CENTER_LEFT",
+      "reference_anchor": "7,7",
+      "candidate_pwm": {
+        "000": null,
+        "001": null,
+        "002": null,
+        "003": null,
+        "004": null
+      },
+      "status": "EMPTY",
+      "user_verified": false,
+      "verified_runs": 0,
+      "last_test_result": null,
+      "safe_return_completed": false,
+      "emergency_stop": false,
+      "notes": "",
+      "updated_at": "",
+      "history": []
+    },
+    "7,11": {
+      "row": 7,
+      "col": 11,
+      "label": "CENTER_RIGHT",
+      "reference_anchor": "7,7",
+      "candidate_pwm": {
+        "000": null,
+        "001": null,
+        "002": null,
+        "003": null,
+        "004": null
+      },
+      "status": "EMPTY",
+      "user_verified": false,
+      "verified_runs": 0,
+      "last_test_result": null,
+      "safe_return_completed": false,
+      "emergency_stop": false,
+      "notes": "",
+      "updated_at": "",
+      "history": []
+    }
+  }
+}

@@ -19,6 +19,7 @@ from app.stage5.logger import Stage5Logger
 from app.stage5.pwm_interpolator import InterpolationError, interpolate_target_pwm
 from app.stage5.safety import derive_pwm_safety_limits
 from app.stage5.state_machine import Stage5State, Stage5StateMachine
+from app.stage5.constants import FORCE_STAGE5_DRY_RUN
 
 
 LOGGER = logging.getLogger(__name__)
@@ -317,7 +318,7 @@ class Stage5Coordinator:
             raise RuntimeError("Arm is busy")
         if arm.state not in {ArmState.OBSERVE_IDLE, ArmState.OBSERVE_HOLD}:
             raise RuntimeError(f"Arm state {arm.state.value} cannot start hover")
-        dry_run = self.stage_state.snapshot().dry_run or self.controller.dry_run
+        dry_run = True if FORCE_STAGE5_DRY_RUN else (self.stage_state.snapshot().dry_run or self.controller.dry_run)
         plan = self.planner.plan_hover_to(
             self.target.row,
             self.target.col,
@@ -334,7 +335,8 @@ class Stage5Coordinator:
         self.stage_state.begin_hover(holding_piece=plan.holding_piece)
         self.arm_state.begin_hover(board_locked=self.board_locked)
         self._active_sequence = plan.sequence.name
-        if plan.dry_run:
+        # Sprint hard gate: never live-send stage5 motion while FORCE_STAGE5_DRY_RUN is True.
+        if FORCE_STAGE5_DRY_RUN or plan.dry_run:
             for label, command in plan.serial_commands:
                 self.logger.log("DRY_RUN_TX", label=label, command=command)
                 LOGGER.info("STAGE5 DRY-RUN TX %s %s", label, command)
@@ -372,7 +374,7 @@ class Stage5Coordinator:
         if not self.stage_state.can_safe_return():
             raise RuntimeError("Safe return only from HOVERING")
         holding = self._holding_piece
-        dry_run = self.stage_state.snapshot().dry_run or self.controller.dry_run
+        dry_run = True if FORCE_STAGE5_DRY_RUN else (self.stage_state.snapshot().dry_run or self.controller.dry_run)
         sequence = self.planner.plan_return_to_observe(holding_piece=holding, dry_run=dry_run)
         self.stage_state.begin_return()
         self.arm_state.begin_return_from_hover()

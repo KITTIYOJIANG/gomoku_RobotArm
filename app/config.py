@@ -43,6 +43,10 @@ class Stage5Config:
     calibration_path: Path
     board_span_cells: int
     allow_motion_without_camera: bool
+    force_dry_run: bool = True
+    cross_anchor_required_runs: int = 3
+    cross_draft_path: Path | None = None
+    hover_samples_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -154,6 +158,10 @@ class AppConfig:
                 calibration_path=project_path((data.get("stage5") or {}).get("calibration_path", "calibration/stage5_board_calibration.json")),
                 board_span_cells=int((data.get("stage5") or {}).get("board_span_cells", 8)),
                 allow_motion_without_camera=bool((data.get("stage5") or {}).get("allow_motion_without_camera", False)),
+                force_dry_run=bool((data.get("stage5") or {}).get("force_dry_run", True)),
+                cross_anchor_required_runs=int((data.get("stage5") or {}).get("cross_anchor_required_runs", 3)),
+                cross_draft_path=project_path((data.get("stage5") or {}).get("cross_draft_path", "calibration/stage5_cross_anchor_drafts.json")),
+                hover_samples_path=project_path((data.get("stage5") or {}).get("hover_samples_path", "datasets/hover_pose/verified_samples.jsonl")),
             ),
             logs_dir=project_path(data["logs_dir"]),
         )

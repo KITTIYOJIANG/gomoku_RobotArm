@@ -20,6 +20,10 @@ from app.arm.state import ArmState, ArmStateMachine, InvalidTransition
 from app.arm.worker import ArmSequenceWorker
 from app.config import AppConfig
 from app.stage5.coordinator import Stage5Coordinator
+from app.stage5.cross_anchor_wizard import CrossAnchorWizard, UserTestResult
+from app.stage5.candidate_store import CandidateStore
+from app.learning.hover_sample_store import HoverSampleStore
+from app.stage5.constants import FORCE_STAGE5_DRY_RUN
 from app.stage5.state_machine import Stage5Invalid, Stage5State
 from app.gui.camera_panel import CameraPanel
 from app.gui.control_panel import ControlPanel
@@ -82,6 +86,19 @@ class MainWindow(QMainWindow):
         if not same:
             raise RuntimeError("Stage5 must share MainWindow SerialArmController instance")
         self._selected_target_freeze = False
+        draft_path = getattr(config.stage5, "cross_draft_path", None) or (config.logs_dir.parent / "calibration" / "stage5_cross_anchor_drafts.json")
+        sample_path = getattr(config.stage5, "hover_samples_path", None) or (config.logs_dir.parent / "datasets" / "hover_pose" / "verified_samples.jsonl")
+        # Offline demo must not pollute production calibration: wizard writes anchors only on complete.
+        self.cross_wizard = CrossAnchorWizard(
+            library=self.actions,
+            calibration=self.stage5.store,
+            drafts=CandidateStore(draft_path),
+            samples=HoverSampleStore(sample_path),
+            required_runs=int(getattr(config.stage5, "cross_anchor_required_runs", 3)),
+            force_dry_run=bool(getattr(config.stage5, "force_dry_run", FORCE_STAGE5_DRY_RUN)),
+        )
+        self._cross_last_plan = None
+        LOGGER.info("[STAGE5][FORCE_DRY_RUN] enabled=%s", int(FORCE_STAGE5_DRY_RUN))
 
         self.camera_panel = CameraPanel()
         self.control_panel = ControlPanel(
@@ -148,6 +165,7 @@ class MainWindow(QMainWindow):
         s5.restore_backup_requested.connect(self.stage5_restore_backup)
         s5.recover_requested.connect(self.stage5_recover)
         s5.estop_requested.connect(self.emergency_stop)
+        self._connect_cross_anchor_signals()
 
         self.arm_worker.sequence_started.connect(self._on_sequence_started)
         self.arm_worker.step_started.connect(self._on_step_started)
@@ -738,6 +756,158 @@ class MainWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "恢复", str(exc))
 
+
+
+    def _connect_cross_anchor_signals(self) -> None:
+        panel = self.control_panel.cross_anchor_panel
+        panel.prev_requested.connect(lambda: self._cross_nav(-1))
+        panel.next_requested.connect(lambda: self._cross_nav(1))
+        panel.select_index_requested.connect(self._cross_select_index)
+        panel.nudge_requested.connect(self._cross_nudge)
+        panel.set_joint_requested.connect(self._cross_set_joint)
+        panel.reset_p77_requested.connect(self._cross_reset_p77)
+        panel.undo_requested.connect(self._cross_undo)
+        panel.save_draft_requested.connect(self._cross_save_draft)
+        panel.load_draft_requested.connect(self._cross_load_draft)
+        panel.validate_requested.connect(self._cross_validate)
+        panel.plan_carry_requested.connect(lambda: self._cross_plan("carry"))
+        panel.plan_target_requested.connect(lambda: self._cross_plan("target"))
+        panel.plan_return_requested.connect(lambda: self._cross_plan("return"))
+        panel.execute_mock_requested.connect(self._cross_execute_mock)
+        panel.result_requested.connect(self._cross_result)
+        panel.complete_requested.connect(self._cross_complete)
+        panel.cancel_confirm_requested.connect(self._cross_cancel)
+        self._refresh_cross_panel()
+
+    def _cross_nav(self, delta: int) -> None:
+        if delta < 0:
+            self.cross_wizard.prev_anchor()
+        else:
+            self.cross_wizard.next_anchor()
+        self._refresh_cross_panel()
+
+    def _cross_select_index(self, index: int) -> None:
+        self.cross_wizard.select_index(int(index))
+        self._refresh_cross_panel()
+
+    def _cross_nudge(self, joint_id: str, delta: int) -> None:
+        try:
+            self.cross_wizard.nudge(joint_id, int(delta))
+            self.control_panel.cross_anchor_panel.append_log(f"nudge {joint_id} {delta:+d}")
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_set_joint(self, joint_id: str, value: int) -> None:
+        try:
+            self.cross_wizard.set_joint(joint_id, int(value))
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_reset_p77(self) -> None:
+        self.cross_wizard.reset_to_p77()
+        self.control_panel.cross_anchor_panel.append_log("reset to P77 reference")
+        self._refresh_cross_panel()
+
+    def _cross_undo(self) -> None:
+        ok = self.cross_wizard.undo()
+        self.control_panel.cross_anchor_panel.append_log("undo" if ok else "nothing to undo")
+        self._refresh_cross_panel()
+
+    def _cross_save_draft(self) -> None:
+        try:
+            entry = self.cross_wizard.save_draft()
+            self.control_panel.cross_anchor_panel.append_log(f"draft saved status={entry.get('status')}")
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR save draft: {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_load_draft(self) -> None:
+        try:
+            entry = self.cross_wizard.load_draft()
+            self.control_panel.cross_anchor_panel.append_log(f"draft loaded runs={entry.get('verified_runs')}")
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR load draft: {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_validate(self) -> None:
+        issues = self.cross_wizard.validate_candidate()
+        for issue in issues:
+            self.control_panel.cross_anchor_panel.append_log(f"[{issue.level}] {issue.code}: {issue.message}")
+        self._refresh_cross_panel()
+
+    def _cross_plan(self, kind: str) -> None:
+        try:
+            if kind == "carry":
+                plan = self.cross_wizard.plan_carry_high_test()
+            elif kind == "target":
+                plan = self.cross_wizard.plan_target_above_test()
+            else:
+                plan = self.cross_wizard.plan_safe_return()
+            self._cross_last_plan = plan
+            self.control_panel.cross_anchor_panel.append_log(
+                f"PLAN {plan.name} duration={plan.estimated_duration_ms}ms pump_off={plan.pump_off}"
+            )
+            for label, command in plan.serial_commands:
+                self.control_panel.cross_anchor_panel.append_log(f"  {label}: {command}")
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR plan: {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_execute_mock(self) -> None:
+        plan = self._cross_last_plan
+        if plan is None:
+            self.control_panel.cross_anchor_panel.append_log("ERROR no plan; generate one first")
+            return
+        try:
+            # Always mock under FORCE_STAGE5_DRY_RUN; never touch real serial.
+            sent = self.cross_wizard.execute_plan_mock(
+                plan,
+                gui_dry_run_checked=self.control_panel.stage5_panel.dry_run_checkbox.isChecked(),
+            )
+            for label, command in sent:
+                self.control_panel.cross_anchor_panel.append_log(f"MOCK_TX {label}: {command}")
+            self.control_panel.cross_anchor_panel.append_log(
+                f"REAL_SERIAL_WRITE_COUNT={self.cross_wizard.real_serial_write_count}"
+            )
+            if plan.name == "CROSS_SAFE_RETURN":
+                self.cross_wizard.mark_safe_return_completed()
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR execute: {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_result(self, result: str) -> None:
+        try:
+            entry = self.cross_wizard.record_user_result(UserTestResult(result))
+            self.control_panel.cross_anchor_panel.append_log(
+                f"USER_RESULT {result} verified_runs={entry.get('verified_runs')}"
+            )
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR result: {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_complete(self) -> None:
+        try:
+            # Use production calibration only if not in pure offline pollution-safe mode.
+            # Offline GUI still writes to configured calibration path; tests use temp paths.
+            out = self.cross_wizard.complete_anchor(write_calibration=True)
+            sample = out.get("sample")
+            self.control_panel.cross_anchor_panel.append_log(
+                f"ANCHOR_COMPLETED sample={None if sample is None else sample.get('sample_id')}"
+            )
+        except Exception as exc:
+            self.control_panel.cross_anchor_panel.append_log(f"ERROR complete: {exc}")
+        self._refresh_cross_panel()
+
+    def _cross_cancel(self) -> None:
+        self.cross_wizard.reset_test_session_flags()
+        self.control_panel.cross_anchor_panel.append_log("cancelled confirmation flags")
+        self._refresh_cross_panel()
+
+    def _refresh_cross_panel(self) -> None:
+        snap = self.cross_wizard.status_snapshot()
+        self.control_panel.cross_anchor_panel.update_view(snap)
 
     def _sync_stage5_context(self, *, reason: str = "") -> None:
         """Single source of truth: pull live COM/board/arm/estop into Stage5."""
