@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
 from PySide6.QtWidgets import QHBoxLayout, QMainWindow, QMessageBox, QSplitter, QWidget
 
@@ -19,6 +19,8 @@ from app.arm.sequences import (
 from app.arm.state import ArmState, ArmStateMachine, InvalidTransition
 from app.arm.worker import ArmSequenceWorker
 from app.config import AppConfig
+from app.stage5.coordinator import Stage5Coordinator
+from app.stage5.state_machine import Stage5Invalid, Stage5State
 from app.gui.camera_panel import CameraPanel
 from app.gui.control_panel import ControlPanel
 from app.logging_config import LogEmitter, QtLogHandler
@@ -61,6 +63,16 @@ class MainWindow(QMainWindow):
             self.actions,
             action_wait_margin_ms=config.timing.action_wait_margin_ms,
         )
+        self.stage5 = Stage5Coordinator(
+            config=config.stage5,
+            actions=self.actions,
+            controller=self.controller,
+            arm_state=self.state_machine,
+            worker=self.arm_worker,
+            action_wait_margin_ms=config.timing.action_wait_margin_ms,
+            logs_dir=config.logs_dir,
+        )
+        self._selected_target_freeze = False
 
         self.camera_panel = CameraPanel()
         self.control_panel = ControlPanel(
@@ -107,6 +119,24 @@ class MainWindow(QMainWindow):
         panel.corner_overlay_options_changed.connect(self.set_corner_overlay_options)
         panel.piece_recognition_requested.connect(self.request_piece_recognition)
 
+        self.camera_panel.image_clicked.connect(self.on_image_clicked)
+        s5 = panel.stage5_panel
+        s5.dry_run_toggled.connect(self.on_stage5_dry_run)
+        s5.hover_requested.connect(self.start_stage5_hover)
+        s5.safe_return_requested.connect(self.start_stage5_safe_return)
+        s5.clear_target_requested.connect(self.clear_stage5_target)
+        s5.set_anchor_requested.connect(self.stage5_set_anchor_from_target)
+        s5.load_from_action_requested.connect(self.stage5_load_from_action)
+        s5.save_anchor_requested.connect(self.stage5_save_anchor)
+        s5.test_anchor_hover_requested.connect(self.start_stage5_hover)
+        s5.confirm_anchor_requested.connect(self.stage5_confirm_anchor)
+        s5.revoke_anchor_requested.connect(self.stage5_revoke_anchor)
+        s5.load_calibration_requested.connect(self.stage5_reload_calibration)
+        s5.export_calibration_requested.connect(self.stage5_export_calibration)
+        s5.restore_backup_requested.connect(self.stage5_restore_backup)
+        s5.recover_requested.connect(self.stage5_recover)
+        s5.estop_requested.connect(self.emergency_stop)
+
         self.arm_worker.sequence_started.connect(self._on_sequence_started)
         self.arm_worker.step_started.connect(self._on_step_started)
         self.arm_worker.sequence_finished.connect(self._on_sequence_finished)
@@ -123,6 +153,7 @@ class MainWindow(QMainWindow):
         worker.frame_ready.connect(self.camera_panel.set_frame)
         worker.camera_status.connect(self._on_camera_status)
         worker.board_status.connect(self._on_board_status)
+        worker.board_geometry.connect(self._on_board_geometry)
         worker.piece_status.connect(self._on_piece_status)
         worker.error.connect(lambda message: LOGGER.error("CAMERA %s", message))
         worker.finished.connect(self._on_camera_finished)
@@ -174,6 +205,10 @@ class MainWindow(QMainWindow):
         self._refresh_ui()
 
     def start_return_to_observe(self) -> None:
+        # From TARGET_ABOVE/HOVERING, never jump directly to OBSERVE.
+        if self.state_machine.snapshot().state == ArmState.HOVERING:
+            self.start_stage5_safe_return()
+            return
         if self.state_machine.state == ArmState.OBSERVE_HOLD:
             answer = QMessageBox.warning(
                 self,
@@ -320,6 +355,15 @@ class MainWindow(QMainWindow):
         self._refresh_ui(current_action=step_name)
 
     def _on_sequence_finished(self, name: str, success: bool, message: str) -> None:
+        if self.stage5.on_sequence_finished(name, success, message):
+            self._set_camera_arm_busy(False)
+            if success and name == "SAFE_RETURN_FROM_HOVER":
+                self.board_locked = False
+                if self.camera_worker is not None:
+                    self.camera_worker.request_relocalize()
+            self._refresh_stage5_ui()
+            self._refresh_ui()
+            return
         if self.state_machine.state == ArmState.ESTOP:
             LOGGER.warning("SEQUENCE %s ended after ESTOP: %s", name, message)
         elif success:
@@ -368,6 +412,7 @@ class MainWindow(QMainWindow):
     ) -> None:
         changed = display_status != self.board_display_status
         self.board_locked = bool(locked)
+        self.stage5.on_board_lock_changed(bool(locked))
         self.target_visible = bool(target_visible)
         self.board_display_status = display_status
         self.corner_status = corner_status
@@ -425,6 +470,273 @@ class MainWindow(QMainWindow):
             busy=snapshot.busy or self.arm_worker.busy,
             board_locked=self.board_locked,
             target_visible=self.target_visible,
+        )
+
+
+    def _on_board_geometry(self, payload: object) -> None:
+        if isinstance(payload, dict):
+            self.stage5.update_geometry(payload)
+
+    def on_image_clicked(self, image_x: float, image_y: float) -> None:
+        if self.stage5.stage_state.is_moving() or self.arm_worker.busy:
+            LOGGER.info("STAGE5 click ignored while arm busy")
+            return
+        selection = self.stage5.handle_click(image_x, image_y, self.config.vision.board_size)
+        if selection.accepted and selection.row is not None and selection.col is not None:
+            if self.camera_worker is not None:
+                self.camera_worker.set_selected_target(selection.row, selection.col)
+            self.camera_panel.set_target_text(f"目标: P({selection.row},{selection.col})")
+        else:
+            LOGGER.info("STAGE5 %s", selection.reason)
+        self._refresh_stage5_ui()
+        self._refresh_ui()
+
+    def on_stage5_dry_run(self, enabled: bool) -> None:
+        try:
+            self.stage5.set_dry_run(bool(enabled))
+        except Stage5Invalid as exc:
+            LOGGER.error("%s", exc)
+            self.control_panel.stage5_panel.dry_run_checkbox.blockSignals(True)
+            self.control_panel.stage5_panel.dry_run_checkbox.setChecked(self.stage5.stage_state.snapshot().dry_run)
+            self.control_panel.stage5_panel.dry_run_checkbox.blockSignals(False)
+        self._refresh_stage5_ui()
+
+    def clear_stage5_target(self) -> None:
+        try:
+            self.stage5.clear_target()
+        except Stage5Invalid as exc:
+            LOGGER.error("%s", exc)
+            return
+        if self.camera_worker is not None:
+            self.camera_worker.set_selected_target(None, None)
+        self.camera_panel.set_target_text("当前目标坐标：-")
+        self._refresh_stage5_ui()
+        self._refresh_ui()
+
+    def start_stage5_hover(self) -> None:
+        try:
+            holding = self.state_machine.snapshot().state == ArmState.OBSERVE_HOLD
+            plan = self.stage5.plan_hover(holding_piece=holding)
+            LOGGER.info(
+                "STAGE5 HOVER plan target=P(%s,%s) source=%s dry_run=%s duration_ms=%s commands=%s",
+                plan.target_row,
+                plan.target_col,
+                plan.source,
+                plan.dry_run,
+                plan.estimated_duration_ms,
+                plan.serial_commands,
+            )
+            submitted, mode = self.stage5.begin_hover_execution(plan)
+            self._set_camera_arm_busy(True)
+            if not submitted:
+                # Software dry-run completion after estimated duration (non-blocking).
+                QTimer.singleShot(max(50, plan.estimated_duration_ms), self._finish_stage5_hover_dry_run)
+            self._refresh_stage5_ui()
+            self._refresh_ui(current_action="HOVER_TO_TARGET")
+        except Exception as exc:
+            LOGGER.error("STAGE5 hover rejected: %s", exc)
+            QMessageBox.warning(self, "阶段五悬停", str(exc))
+            self._refresh_stage5_ui()
+            self._refresh_ui()
+
+    def _finish_stage5_hover_dry_run(self) -> None:
+        if self.stage5.stage_state.state not in {
+            Stage5State.MOVING_TO_CARRY_HIGH,
+            Stage5State.MOVING_TO_TARGET_ABOVE,
+            Stage5State.PRE_MOVE_CHECK,
+        }:
+            return
+        self.stage5.complete_hover_dry_run()
+        self._set_camera_arm_busy(False)
+        self._refresh_stage5_ui()
+        self._refresh_ui()
+        LOGGER.info("STAGE5 DRY-RUN hover complete (ESTIMATED_MOTION_COMPLETE)")
+
+    def start_stage5_safe_return(self) -> None:
+        try:
+            sequence, submitted = self.stage5.begin_safe_return()
+            self._set_camera_arm_busy(True)
+            if not submitted:
+                duration = sum(
+                    self.actions.get(step.action_name).duration_ms
+                    for step in sequence.steps
+                    if hasattr(step, "action_name")
+                ) + self.config.timing.action_wait_margin_ms * len(sequence.action_names)
+                QTimer.singleShot(max(50, duration), self._finish_stage5_return_dry_run)
+            self._refresh_stage5_ui()
+            self._refresh_ui(current_action=sequence.name)
+        except Exception as exc:
+            LOGGER.error("STAGE5 safe return rejected: %s", exc)
+            QMessageBox.warning(self, "安全返回", str(exc))
+            self._refresh_stage5_ui()
+            self._refresh_ui()
+
+    def _finish_stage5_return_dry_run(self) -> None:
+        if self.stage5.stage_state.state not in {
+            Stage5State.RETURNING_TO_CARRY_HIGH,
+            Stage5State.RETURNING_TO_OBSERVE,
+        }:
+            return
+        self.stage5.complete_return_dry_run()
+        self._set_camera_arm_busy(False)
+        self.board_locked = False
+        if self.camera_worker is not None:
+            self.camera_worker.request_relocalize()
+        self._refresh_stage5_ui()
+        self._refresh_ui()
+        LOGGER.info("STAGE5 DRY-RUN safe return complete (ESTIMATED_MOTION_COMPLETE)")
+
+    def stage5_load_from_action(self) -> None:
+        try:
+            pwm = self.stage5.store.load_pwm_from_action("P77_ABOVE_IDLE")
+            self.control_panel.stage5_panel.set_pwm_values(pwm)
+            LOGGER.info("STAGE5 loaded PWM from P77_ABOVE_IDLE: %s", pwm)
+        except Exception as exc:
+            LOGGER.error("%s", exc)
+            QMessageBox.warning(self, "载入动作", str(exc))
+
+    def stage5_set_anchor_from_target(self) -> None:
+        target = self.stage5.target
+        if target.row is None or target.col is None:
+            QMessageBox.warning(self, "设为标定点", "请先选择目标交点")
+            return
+        if not self.stage5.store.is_anchor_point(target.row, target.col):
+            QMessageBox.warning(self, "设为标定点", f"P({target.row},{target.col}) 不在锚点集合中")
+            return
+        try:
+            pwm = self.control_panel.stage5_panel.pwm_values()
+        except Exception as exc:
+            QMessageBox.warning(self, "设为标定点", str(exc))
+            return
+        try:
+            self.stage5.store.upsert_anchor(target.row, target.col, pwm, calibrated=False)
+            LOGGER.info("STAGE5 draft anchor P(%s,%s) %s", target.row, target.col, pwm)
+            self.stage5.select_target_programmatically(target.row, target.col, self.config.vision.board_size)
+            self._refresh_stage5_ui()
+        except Exception as exc:
+            QMessageBox.warning(self, "设为标定点", str(exc))
+
+    def stage5_save_anchor(self) -> None:
+        target = self.stage5.target
+        if target.row is None or target.col is None:
+            QMessageBox.warning(self, "保存锚点", "请先选择目标交点")
+            return
+        try:
+            pwm = self.control_panel.stage5_panel.pwm_values()
+            self.stage5.store.upsert_anchor(target.row, target.col, pwm, calibrated=False)
+            self.stage5.store.save()
+            LOGGER.info("STAGE5 saved anchor P(%s,%s)", target.row, target.col)
+            self.stage5.select_target_programmatically(target.row, target.col, self.config.vision.board_size)
+            self._refresh_stage5_ui()
+        except Exception as exc:
+            QMessageBox.warning(self, "保存锚点", str(exc))
+
+    def stage5_confirm_anchor(self) -> None:
+        target = self.stage5.target
+        if target.row is None or target.col is None:
+            QMessageBox.warning(self, "确认锚点", "请先选择目标交点")
+            return
+        reply = QMessageBox.question(
+            self,
+            "确认锚点安全",
+            f"确认 P({target.row},{target.col}) 已完成实机悬停并安全？\n"
+            "确认后 calibrated=true 且 verified_runs +1。",
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            anchor = self.stage5.store.confirm_anchor_safe(target.row, target.col)
+            self.stage5.logger.log("VERIFIED_BY_USER", row=target.row, col=target.col, verified_runs=anchor.verified_runs)
+            self.stage5.select_target_programmatically(target.row, target.col, self.config.vision.board_size)
+            self._refresh_stage5_ui()
+        except Exception as exc:
+            QMessageBox.warning(self, "确认锚点", str(exc))
+
+    def stage5_revoke_anchor(self) -> None:
+        target = self.stage5.target
+        if target.row is None or target.col is None:
+            return
+        try:
+            self.stage5.store.revoke_anchor_safe(target.row, target.col)
+            self.stage5.select_target_programmatically(target.row, target.col, self.config.vision.board_size)
+            self._refresh_stage5_ui()
+        except Exception as exc:
+            QMessageBox.warning(self, "取消确认", str(exc))
+
+    def stage5_reload_calibration(self) -> None:
+        self.stage5.store.reload()
+        if self.stage5.target.row is not None and self.stage5.target.col is not None:
+            self.stage5.select_target_programmatically(
+                self.stage5.target.row,
+                self.stage5.target.col,
+                self.config.vision.board_size,
+            )
+        self._refresh_stage5_ui()
+        LOGGER.info("STAGE5 calibration reloaded")
+
+    def stage5_export_calibration(self) -> None:
+        try:
+            dest = self.config.logs_dir / "stage5" / "exported_calibration.json"
+            self.stage5.store.export_to(dest)
+            LOGGER.info("STAGE5 calibration exported to %s", dest)
+            QMessageBox.information(self, "导出标定", f"已导出到\n{dest}")
+        except Exception as exc:
+            QMessageBox.warning(self, "导出标定", str(exc))
+
+    def stage5_restore_backup(self) -> None:
+        try:
+            source = self.stage5.store.restore_latest_backup()
+            LOGGER.info("STAGE5 restored backup %s", source)
+            self._refresh_stage5_ui()
+            QMessageBox.information(self, "恢复备份", f"已从备份恢复\n{source}")
+        except Exception as exc:
+            QMessageBox.warning(self, "恢复备份", str(exc))
+
+    def stage5_recover(self) -> None:
+        try:
+            # User must manually re-arm after ESTOP.
+            if self.state_machine.snapshot().state == ArmState.ESTOP:
+                # Keep arm ESTOP until user uses existing flow (return observe after reconnect).
+                pass
+            self.stage5.recover()
+            if self.camera_worker is not None:
+                self.camera_worker.set_selected_target(None, None)
+            self.camera_panel.set_target_text("当前目标坐标：-")
+            self._refresh_stage5_ui()
+            self._refresh_ui()
+        except Exception as exc:
+            QMessageBox.warning(self, "恢复", str(exc))
+
+    def _refresh_stage5_ui(self) -> None:
+        snap = self.stage5.stage_state.snapshot()
+        target = self.stage5.target
+        panel = self.control_panel.stage5_panel
+        if target.pwm:
+            panel.set_pwm_values(target.pwm)
+        panel.update_target_view(
+            state=snap.state.value,
+            row=target.row,
+            col=target.col,
+            pixel_x=target.pixel_x,
+            pixel_y=target.pixel_y,
+            calibrated=target.calibrated_text,
+            region=target.region_text,
+            source=target.source,
+            pwm_text=target.pwm_text,
+            verified_runs=target.verified_runs,
+        )
+        arm = self.state_machine.snapshot()
+        panel.set_enabled_state(
+            serial_connected=self.controller.is_connected,
+            board_locked=self.board_locked,
+            busy=arm.busy or self.arm_worker.busy or self.stage5.stage_state.is_moving(),
+            can_hover=self.stage5.stage_state.can_execute_hover()
+            and arm.state in {ArmState.OBSERVE_IDLE, ArmState.OBSERVE_HOLD}
+            and not arm.busy
+            and not self.arm_worker.busy,
+            can_return=self.stage5.stage_state.can_safe_return() and not arm.busy and not self.arm_worker.busy,
+            has_target=target.row is not None,
+            estop=snap.state == Stage5State.EMERGENCY_STOP or arm.state == ArmState.ESTOP,
         )
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API

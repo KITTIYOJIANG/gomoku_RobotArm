@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import TypeAlias
@@ -87,6 +87,32 @@ def run_full_cycle(vacuum_build_ms: int = 700, release_ms: int = 700) -> Sequenc
     return sequence
 
 
+
+def hover_to_target(*, holding_piece: bool) -> SequenceDefinition:
+    """Carry-high then TARGET_ABOVE. Runtime target action must be registered first."""
+    carry = "CARRY_HIGH_P77_HOLD" if holding_piece else "CARRY_HIGH_P77_IDLE"
+    target = "TARGET_ABOVE_HOLD" if holding_piece else "TARGET_ABOVE_IDLE"
+    sequence = SequenceDefinition(
+        name="HOVER_TO_TARGET",
+        display_name="悬停到目标上方",
+        requires_board=True,
+        steps=(ActionStep(carry), ActionStep(target)),
+    )
+    validate_safe_sequence(sequence)
+    return sequence
+
+
+def safe_return_from_hover(*, holding_piece: bool) -> SequenceDefinition:
+    carry = "CARRY_HIGH_P77_HOLD" if holding_piece else "CARRY_HIGH_P77_IDLE"
+    observe = "OBSERVE_HOLD" if holding_piece else "OBSERVE_IDLE"
+    sequence = SequenceDefinition(
+        name="SAFE_RETURN_FROM_HOVER",
+        display_name="安全返回观察位",
+        steps=(ActionStep(carry), ActionStep(observe)),
+    )
+    validate_safe_sequence(sequence)
+    return sequence
+
 def validate_safe_sequence(sequence: SequenceDefinition) -> None:
     names = sequence.action_names
     if any(step.duration_ms < 0 for step in sequence.steps if isinstance(step, WaitStep)):
@@ -128,3 +154,4 @@ def validate_safe_sequence(sequence: SequenceDefinition) -> None:
             < suffix.index("OBSERVE_IDLE")
         ):
             raise ValueError(f"{sequence.name}: safe P77 exit order is invalid")
+

@@ -53,10 +53,12 @@ def draw_board_overlay(
     target_row: int = 7,
     target_col: int = 7,
     target_name: str = "P77",
+    selected_row: int | None = None,
+    selected_col: int | None = None,
     show_corners: bool = True,
     show_corner_coordinates: bool = False,
 ) -> np.ndarray:
-    """Draw boundary, grid, P77, and corners from one stable homography."""
+    """Draw boundary, grid, fixed P77, optional selected target, and corners."""
 
     output = display_frame.copy()
     ordered = np.asarray(corners, dtype=np.float32).reshape(4, 2)
@@ -73,19 +75,35 @@ def draw_board_overlay(
         cv2.line(output, tuple(horizontal[0]), tuple(horizontal[1]), (90, 210, 255), 1, cv2.LINE_AA)
         cv2.line(output, tuple(vertical[0]), tuple(vertical[1]), (90, 210, 255), 1, cv2.LINE_AA)
 
-    target_point = tuple(np.rint(grid[target_row, target_col]).astype(int))
-    cv2.circle(output, target_point, 13, (0, 0, 255), 3, cv2.LINE_AA)
-    cv2.circle(output, target_point, 4, (0, 255, 255), -1, cv2.LINE_AA)
+    p77_point = tuple(np.rint(grid[target_row, target_col]).astype(int))
+    cv2.circle(output, p77_point, 10, (0, 180, 255), 2, cv2.LINE_AA)
     cv2.putText(
         output,
         f"{target_name} ({target_row},{target_col})",
-        _text_origin(output, target_point, 16, -12),
+        _text_origin(output, p77_point, 16, -12),
         cv2.FONT_HERSHEY_SIMPLEX,
-        0.65,
-        (0, 255, 255),
+        0.55,
+        (0, 180, 255),
         2,
         cv2.LINE_AA,
     )
+
+    draw_row = target_row if selected_row is None else int(selected_row)
+    draw_col = target_col if selected_col is None else int(selected_col)
+    if 0 <= draw_row < board_size and 0 <= draw_col < board_size:
+        target_point = tuple(np.rint(grid[draw_row, draw_col]).astype(int))
+        cv2.circle(output, target_point, 14, (0, 0, 255), 3, cv2.LINE_AA)
+        cv2.circle(output, target_point, 5, (0, 255, 255), -1, cv2.LINE_AA)
+        cv2.putText(
+            output,
+            f"TARGET P({draw_row},{draw_col})",
+            _text_origin(output, target_point, 16, 18),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.65,
+            (0, 255, 255),
+            2,
+            cv2.LINE_AA,
+        )
     if show_corners:
         _draw_board_corners_inplace(
             output,

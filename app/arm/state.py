@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
@@ -13,6 +13,9 @@ class ArmState(str, Enum):
     PICKING = "PICKING"
     OBSERVE_HOLD = "OBSERVE_HOLD"
     PLACING_P77 = "PLACING_P77"
+    MOVING_TO_HOVER = "MOVING_TO_HOVER"
+    HOVERING = "HOVERING"
+    RETURNING_FROM_HOVER = "RETURNING_FROM_HOVER"
     ERROR = "ERROR"
     ESTOP = "ESTOP"
 
@@ -169,6 +172,43 @@ class ArmStateMachine:
             self._error = None
             return self._set_state(ArmState.UNKNOWN)
 
+
+    def can_hover(self, *, board_locked: bool) -> bool:
+        with self._lock:
+            return (
+                not self._busy
+                and self._state in {ArmState.OBSERVE_IDLE, ArmState.OBSERVE_HOLD, ArmState.HOVERING}
+                and bool(board_locked)
+            )
+
+    def begin_hover(self, *, board_locked: bool, holding_piece: bool | None = None) -> tuple[ArmState, ArmState]:
+        with self._lock:
+            self._require_idle()
+            if self._state not in {ArmState.OBSERVE_IDLE, ArmState.OBSERVE_HOLD}:
+                raise InvalidTransition("Hover requires OBSERVE_IDLE or OBSERVE_HOLD")
+            if not board_locked:
+                raise InvalidTransition("Hover requires BOARD LOCKED")
+            self._busy = True
+            self._current_action = "HOVER_TO_TARGET"
+            self._error = None
+            return self._set_state(ArmState.MOVING_TO_HOVER)
+
+    def complete_hover(self) -> tuple[ArmState, ArmState]:
+        return self._complete("HOVER_TO_TARGET", ArmState.MOVING_TO_HOVER, ArmState.HOVERING)
+
+    def begin_return_from_hover(self) -> tuple[ArmState, ArmState]:
+        with self._lock:
+            self._require_idle()
+            if self._state != ArmState.HOVERING:
+                raise InvalidTransition("Safe return-from-hover requires HOVERING")
+            self._busy = True
+            self._current_action = "SAFE_RETURN_FROM_HOVER"
+            self._error = None
+            return self._set_state(ArmState.RETURNING_FROM_HOVER)
+
+    def complete_return_from_hover(self, *, holding_piece: bool) -> tuple[ArmState, ArmState]:
+        final = ArmState.OBSERVE_HOLD if holding_piece else ArmState.OBSERVE_IDLE
+        return self._complete("SAFE_RETURN_FROM_HOVER", ArmState.RETURNING_FROM_HOVER, final)
     def estop(self) -> tuple[ArmState, ArmState]:
         with self._lock:
             self._busy = False
@@ -207,3 +247,4 @@ class ArmStateMachine:
         previous = self._state
         self._state = target
         return previous, target
+

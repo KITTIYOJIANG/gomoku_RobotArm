@@ -77,6 +77,8 @@ class BoardLocator:
         self._arm_busy = False
         self._show_corners = True
         self._show_corner_coordinates = False
+        self._selected_row: int | None = None
+        self._selected_col: int | None = None
         self.tracker = BoardTracker(
             smoothing_alpha=corner_smoothing_alpha,
             failure_limit=tracker_failure_limit,
@@ -123,6 +125,10 @@ class BoardLocator:
     def set_overlay_options(self, *, show_corners: bool, show_coordinates: bool) -> None:
         self._show_corners = bool(show_corners)
         self._show_corner_coordinates = bool(show_coordinates)
+
+    def set_selected_target(self, row: int | None, col: int | None) -> None:
+        self._selected_row = None if row is None else int(row)
+        self._selected_col = None if col is None else int(col)
 
     def process(
         self,

@@ -25,6 +25,7 @@ class CameraWorker(QThread):
     frame_ready = Signal(object, float)
     camera_status = Signal(str)
     board_status = Signal(bool, str, bool, str, str)
+    board_geometry = Signal(object)
     piece_status = Signal(str, object)
     error = Signal(str)
 
@@ -40,6 +41,8 @@ class CameraWorker(QThread):
         self._arm_busy = False
         self._show_corners = True
         self._show_corner_coordinates = False
+        self._selected_row: int | None = None
+        self._selected_col: int | None = None
         self._capture = None
 
     def stop(self) -> None:
@@ -59,6 +62,11 @@ class CameraWorker(QThread):
         with self._state_lock:
             self._show_corners = bool(show_corners)
             self._show_corner_coordinates = bool(show_coordinates)
+
+    def set_selected_target(self, row: int | None, col: int | None) -> None:
+        with self._state_lock:
+            self._selected_row = None if row is None else int(row)
+            self._selected_col = None if col is None else int(col)
 
     def run(self) -> None:
         locator = BoardLocator(
@@ -130,11 +138,14 @@ class CameraWorker(QThread):
                 arm_busy = self._arm_busy
                 show_corners = self._show_corners
                 show_corner_coordinates = self._show_corner_coordinates
+                selected_row = self._selected_row
+                selected_col = self._selected_col
             locator.set_arm_busy(arm_busy)
             locator.set_overlay_options(
                 show_corners=show_corners,
                 show_coordinates=show_corner_coordinates,
             )
+            locator.set_selected_target(selected_row, selected_col)
 
             if capture is None:
                 frame = make_test_pattern(
@@ -189,4 +200,13 @@ class CameraWorker(QThread):
             if board_key != last_board:
                 self.board_status.emit(*board_key)
                 last_board = board_key
+            if observation.homography is not None and observation.corners is not None:
+                self.board_geometry.emit(
+                    {
+                        "homography": observation.homography.copy(),
+                        "corners": observation.corners.copy(),
+                        "board_locked": bool(observation.board_locked),
+                        "track_state": observation.track_state.value,
+                    }
+                )
             self.frame_ready.emit(annotated, fps)

@@ -36,6 +36,16 @@ class CameraConfig:
 
 
 @dataclass(frozen=True)
+class Stage5Config:
+    enabled: bool
+    default_dry_run: bool
+    click_threshold_ratio: float
+    calibration_path: Path
+    board_span_cells: int
+    allow_motion_without_camera: bool
+
+
+@dataclass(frozen=True)
 class TimingConfig:
     action_wait_margin_ms: int
     vacuum_build_ms: int
@@ -80,6 +90,7 @@ class AppConfig:
     camera: CameraConfig
     timing: TimingConfig
     vision: VisionConfig
+    stage5: Stage5Config
     logs_dir: Path
 
     @classmethod
@@ -136,6 +147,14 @@ class AppConfig:
                     white_area_ratio=float(piece["white_area_ratio"]),
                 ),
             ),
+            stage5=Stage5Config(
+                enabled=bool((data.get("stage5") or {}).get("enabled", True)),
+                default_dry_run=bool((data.get("stage5") or {}).get("default_dry_run", True)),
+                click_threshold_ratio=float((data.get("stage5") or {}).get("click_threshold_ratio", 0.32)),
+                calibration_path=project_path((data.get("stage5") or {}).get("calibration_path", "calibration/stage5_board_calibration.json")),
+                board_span_cells=int((data.get("stage5") or {}).get("board_span_cells", 8)),
+                allow_motion_without_camera=bool((data.get("stage5") or {}).get("allow_motion_without_camera", False)),
+            ),
             logs_dir=project_path(data["logs_dir"]),
         )
         result.validate()
@@ -156,8 +175,13 @@ class AppConfig:
             raise ValueError("Tracker lost timeout must be positive")
         if self.vision.board_size < 2:
             raise ValueError("Vision board size must be at least two")
+        if not 0.1 <= self.stage5.click_threshold_ratio <= 0.5:
+            raise ValueError('stage5 click_threshold_ratio must be in [0.1, 0.5]')
+        if self.stage5.board_span_cells < 1:
+            raise ValueError('stage5 board_span_cells must be positive')
         if not (
             0 <= self.vision.target_row < self.vision.board_size
             and 0 <= self.vision.target_col < self.vision.board_size
         ):
             raise ValueError("P77 target must be inside the configured board")
+

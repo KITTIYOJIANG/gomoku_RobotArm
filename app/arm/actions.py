@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import dataclass
 import json
@@ -111,3 +111,28 @@ class ActionLibrary:
                     f"{self.time_min_ms}..{self.time_max_ms}"
                 )
         return Action(name=name, command=command, targets=targets)
+
+    def register_runtime(self, action: Action) -> None:
+        """Register or replace a runtime-only action (not persisted to JSON)."""
+        key = action.name.strip().upper()
+        # Re-validate against library bounds without requiring JSON membership.
+        for target in action.targets:
+            if not self.pwm_min <= target.pwm <= self.pwm_max:
+                raise ValueError(
+                    f"{key}: servo {target.servo_id:03d} PWM {target.pwm} outside "
+                    f"{self.pwm_min}..{self.pwm_max}"
+                )
+            if not self.time_min_ms <= target.time_ms <= self.time_max_ms:
+                raise ValueError(
+                    f"{key}: servo {target.servo_id:03d} time {target.time_ms} outside "
+                    f"{self.time_min_ms}..{self.time_max_ms}"
+                )
+        self._actions[key] = action
+
+    def unregister_runtime(self, name: str) -> None:
+        key = name.strip().upper()
+        # Never remove JSON-backed stable actions via this path if name collides;
+        # runtime names should use TARGET_ABOVE_* prefixes.
+        if key in self._actions and key.startswith("TARGET_ABOVE"):
+            del self._actions[key]
+

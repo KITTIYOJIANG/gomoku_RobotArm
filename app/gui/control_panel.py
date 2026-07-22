@@ -18,6 +18,7 @@ from app.arm.controller import available_serial_ports
 from app.arm.state import ArmState
 
 from .log_panel import LogPanel
+from .stage5_panel import Stage5Panel
 from .status_panel import StatusPanel
 
 
@@ -75,6 +76,7 @@ class ControlPanel(QWidget):
         self._dry_run = bool(dry_run)
         self.status_panel = StatusPanel()
         self.log_panel = LogPanel()
+        self.stage5_panel = Stage5Panel(default_dry_run=True)
 
         content = QWidget()
         content_layout = QVBoxLayout(content)
@@ -82,6 +84,7 @@ class ControlPanel(QWidget):
         content_layout.addWidget(self._build_connection_group(default_port, default_test_pattern))
         content_layout.addWidget(self._build_vision_debug_group())
         content_layout.addWidget(self._build_core_group())
+        content_layout.addWidget(self.stage5_panel)
         content_layout.addWidget(self._build_manual_group())
         content_layout.addWidget(self._build_future_group())
         content_layout.addWidget(self._build_safety_group())
