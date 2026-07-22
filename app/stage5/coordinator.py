@@ -82,16 +82,53 @@ class Stage5Coordinator:
         self.logger.log("DRY_RUN_SET", dry_run=bool(enabled))
 
     def on_serial_connected(self) -> None:
-        self.stage_state.on_serial_connected(board_locked=self.board_locked)
-        self.logger.log("SERIAL_CONNECTED", port=self.controller.port, board_locked=self.board_locked)
+        state = self.stage_state.on_serial_connected(board_locked=self.board_locked)
+        self.logger.log(
+            "SERIAL_SYNC",
+            connected=1,
+            port=self.controller.port,
+            board_locked=self.board_locked,
+            stage5=state.value,
+        )
 
     def on_serial_disconnected(self) -> None:
-        self.stage_state.on_serial_disconnected()
-        self.logger.log("SERIAL_DISCONNECTED")
+        state = self.stage_state.on_serial_disconnected()
+        self.logger.log("SERIAL_SYNC", connected=0, stage5=state.value)
 
     def on_board_lock_changed(self, locked: bool) -> None:
         self.board_locked = bool(locked)
-        self.stage_state.on_board_lock_changed(bool(locked))
+        state = self.stage_state.on_board_lock_changed(bool(locked))
+        self.logger.log("BOARD_SYNC", locked=int(bool(locked)), stage5=state.value)
+
+    def on_arm_state(self, arm_state_name: str) -> None:
+        state = self.stage_state.on_arm_state(arm_state_name)
+        self.logger.log("ARM_SYNC", arm_state=arm_state_name, stage5=state.value)
+
+    def sync_from_main(
+        self,
+        *,
+        serial_connected: bool,
+        board_locked: bool,
+        arm_state_name: str,
+        estop: bool = False,
+    ) -> None:
+        """Full resync used after connect/return/board events."""
+        self.board_locked = bool(board_locked)
+        ready = arm_state_name in {"OBSERVE_IDLE", "OBSERVE_HOLD"}
+        state = self.stage_state.sync_context(
+            serial_connected=bool(serial_connected),
+            board_locked=bool(board_locked),
+            arm_ready=ready,
+            estop=bool(estop),
+        )
+        self.logger.log(
+            "FULL_SYNC",
+            serial=int(serial_connected),
+            board=int(board_locked),
+            arm=arm_state_name,
+            estop=int(estop),
+            stage5=state.value,
+        )
 
     def update_geometry(self, payload: dict[str, Any]) -> None:
         if self.stage_state.is_moving() or self.stage_state.state == Stage5State.HOVERING:
@@ -193,7 +230,7 @@ class Stage5Coordinator:
             pixel_x=pixel_x,
             pixel_y=pixel_y,
             calibrated_text="YES" if calibrated else "NO",
-            region_text="INSIDE" if in_region else "OUTSIDE",
+            region_text="YES" if in_region else "NO",
             source=source,
             pwm_text=pwm_text,
             verified_runs=verified,

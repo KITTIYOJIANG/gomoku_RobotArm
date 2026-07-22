@@ -48,6 +48,7 @@ def test_hover_hold_keeps_pump_on(tmp_path: Path):
 def test_stage5_state_machine_click_does_not_move():
     sm = Stage5StateMachine(dry_run=True)
     sm.on_serial_connected(board_locked=True)
+    sm.on_arm_state("OBSERVE_IDLE")
     assert sm.state == Stage5State.READY
     sm.select_target(7, 7, board_locked=True, calibrated=True, in_region=True)
     assert sm.state == Stage5State.DRY_RUN_READY
@@ -86,6 +87,7 @@ def test_coordinator_dry_run_hover(tmp_path: Path):
         )
         coord.on_serial_connected()
         coord.on_board_lock_changed(True)
+        coord.on_arm_state("OBSERVE_IDLE")
         coord.select_target_programmatically(7, 7, 15)
         plan = coord.plan_hover(holding_piece=False)
         submitted, mode = coord.begin_hover_execution(plan)

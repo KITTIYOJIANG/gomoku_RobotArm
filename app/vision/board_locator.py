@@ -174,6 +174,16 @@ class BoardLocator:
             detection_performed=should_detect,
             arm_busy=self._arm_busy,
         )
+        # Piece recognition MUST run on pristine detection_frame before overlays.
+        piece_result = None
+        if recognize_pieces and track.placement_ready and track.homography is not None:
+            piece_result = self.piece_recognizer.recognize(
+                detection_frame,
+                homography=track.homography,
+                board_size=self.board_size,
+            )
+            LOGGER.info("PIECE RECOGNITION %s", piece_result.summary)
+
         if track.displayable:
             assert track.smoothed_corners is not None
             assert track.homography is not None
@@ -191,21 +201,14 @@ class BoardLocator:
                 show_corners=self._show_corners,
                 show_corner_coordinates=self._show_corner_coordinates,
             )
-
-        piece_result = None
-        if recognize_pieces and track.placement_ready and track.homography is not None:
-            piece_result = self.piece_recognizer.recognize(
-                detection_frame,
-                homography=track.homography,
-                board_size=self.board_size,
-            )
-            LOGGER.info("PIECE RECOGNITION %s", piece_result.summary)
-            display_frame = draw_piece_matrix(
-                display_frame,
-                homography=track.homography,
-                board_matrix=piece_result.board_matrix,
-                board_size=self.board_size,
-            )
+            if piece_result is not None:
+                display_frame = draw_piece_matrix(
+                    display_frame,
+                    homography=track.homography,
+                    board_matrix=piece_result.board_matrix,
+                    board_size=self.board_size,
+                    diagnostics=piece_result.diagnostics,
+                )
 
         reason = self._reason(track, detection_error)
         observation = self._observation(display_frame, track, reason)

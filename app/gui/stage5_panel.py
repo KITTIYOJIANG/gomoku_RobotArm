@@ -202,7 +202,8 @@ class Stage5Panel(QWidget):
         estop: bool,
     ) -> None:
         ordinary = serial_connected and not busy and not estop
-        self.dry_run_checkbox.setEnabled(ordinary)
+        # DRY RUN toggle must remain operable for inspection even when DISCONNECTED.
+        self.dry_run_checkbox.setEnabled(not busy)
         self.hover_button.setEnabled(ordinary and can_hover)
         self.return_button.setEnabled(ordinary and can_return)
         self.clear_button.setEnabled(ordinary and has_target)
@@ -218,11 +219,11 @@ class Stage5Panel(QWidget):
             self.restore_button,
         ):
             button.setEnabled(ordinary and has_target)
-        self.load_file_button.setEnabled(ordinary)
-        self.export_button.setEnabled(ordinary)
-        self.restore_button.setEnabled(ordinary)
-        self.load_action_button.setEnabled(ordinary)
+        self.load_file_button.setEnabled(not busy)
+        self.export_button.setEnabled(not busy)
+        self.restore_button.setEnabled(not busy)
+        self.load_action_button.setEnabled(not busy)
         self.recover_button.setEnabled(serial_connected and estop and not busy)
         self.estop_button.setEnabled(serial_connected)
         for edit in self.pwm_edits.values():
-            edit.setEnabled(ordinary)
+            edit.setEnabled(not busy)

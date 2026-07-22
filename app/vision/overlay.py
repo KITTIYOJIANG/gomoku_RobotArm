@@ -252,10 +252,39 @@ def draw_piece_matrix(
     homography: np.ndarray,
     board_matrix: object,
     board_size: int = 15,
+    diagnostics: object | None = None,
 ) -> np.ndarray:
-    """Overlay recognized black/white stones on intersections."""
+    """Overlay recognized stones and optional candidate diagnostics."""
     output = display_frame
     grid = grid_points_from_homography(np.asarray(homography, dtype=np.float32), board_size)
+
+    # Diagnostic: draw all candidates first.
+    if diagnostics:
+        for diag in diagnostics:
+            center = (int(round(diag.center_x)), int(round(diag.center_y)))
+            radius = max(3, int(round(diag.radius)))
+            if diag.accepted:
+                color = (0, 255, 0)
+            elif diag.classified_color in {"Black", "White"}:
+                color = (0, 165, 255)  # rejected classified
+            else:
+                color = (128, 128, 128)  # unclassified
+            cv2.circle(output, center, radius, color, 1, cv2.LINE_AA)
+            if diag.nearest_row is not None and diag.nearest_col is not None:
+                nearest = tuple(np.rint(grid[diag.nearest_row, diag.nearest_col]).astype(int))
+                cv2.line(output, center, nearest, color, 1, cv2.LINE_AA)
+            label = f"{diag.candidate_id}:{diag.reject_reason[:10]}"
+            cv2.putText(
+                output,
+                label,
+                (center[0] + 4, center[1] - 4),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.35,
+                color,
+                1,
+                cv2.LINE_AA,
+            )
+
     for row_index, row in enumerate(board_matrix):
         for col_index, value in enumerate(row):
             if int(value) == 0:
