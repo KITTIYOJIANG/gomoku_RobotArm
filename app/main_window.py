@@ -72,6 +72,15 @@ class MainWindow(QMainWindow):
             action_wait_margin_ms=config.timing.action_wait_margin_ms,
             logs_dir=config.logs_dir,
         )
+        same = self.stage5.controller is self.controller
+        LOGGER.info(
+            "[STAGE5][CONTROLLER_ID] main_controller_id=%s stage5_controller_id=%s same_instance=%s",
+            id(self.controller),
+            id(self.stage5.controller),
+            int(same),
+        )
+        if not same:
+            raise RuntimeError("Stage5 must share MainWindow SerialArmController instance")
         self._selected_target_freeze = False
 
         self.camera_panel = CameraPanel()
@@ -100,6 +109,9 @@ class MainWindow(QMainWindow):
 
         self._connect_signals()
         self.arm_worker.start()
+        # Stage5 is created after controller; immediately pull current main context
+        # so late construction never misses an already-connected COM/board/arm state.
+        self._sync_stage5_context(reason="init")
         self._refresh_ui()
         LOGGER.info("APPLICATION READY dry_run=%s; no automatic camera/COM connection", self.dry_run)
 
@@ -190,12 +202,14 @@ class MainWindow(QMainWindow):
             self.controller.connect(port)
             transition = self.state_machine.connect()
             self._log_transition(transition)
-            self.stage5.on_serial_connected()
-            self._sync_stage5_from_main(reason="serial_connected")
             LOGGER.info("[STAGE5][SERIAL_SYNC] connected=1 port=%s", port)
         except Exception as exc:
             LOGGER.error("SERIAL CONNECT FAILED: %s", exc)
             QMessageBox.critical(self, "串口连接失败", str(exc))
+            self._sync_stage5_context(reason="serial_connect_failed")
+            self._refresh_ui()
+            return
+        self._sync_stage5_context(reason="serial_connected")
         self._refresh_ui()
 
     def disconnect_serial(self) -> None:
@@ -204,9 +218,9 @@ class MainWindow(QMainWindow):
         self.controller.disconnect()
         transition = self.state_machine.disconnect()
         self._log_transition(transition)
-        self.stage5.on_serial_disconnected()
         self._set_camera_arm_busy(False)
         LOGGER.info("[STAGE5][SERIAL_SYNC] connected=0")
+        self._sync_stage5_context(reason="serial_disconnected")
         self._refresh_ui()
 
     def start_return_to_observe(self) -> None:
@@ -311,7 +325,7 @@ class MainWindow(QMainWindow):
         transition = self.state_machine.estop()
         self._log_transition(transition)
         self.stage5.estop()
-        self._sync_stage5_from_main(reason="estop")
+        self._sync_stage5_context(reason="estop")
         self._set_camera_arm_busy(False)
         LOGGER.critical("EMERGENCY STOP LATCHED")
         self._refresh_ui()
@@ -393,7 +407,7 @@ class MainWindow(QMainWindow):
         else:
             self._log_transition(self.state_machine.fail(message or f"{name} failed"))
 
-        self._sync_stage5_from_main(reason=f"sequence_finished:{name}:{success}")
+        self._sync_stage5_context(reason=f"sequence_finished:{name}:{success}")
         self._set_camera_arm_busy(False)
         if success and name in {"RETURN_TO_OBSERVE", "PLACE_TO_P77", "FULL_CYCLE"}:
             self.board_locked = False
@@ -420,8 +434,8 @@ class MainWindow(QMainWindow):
     ) -> None:
         changed = display_status != self.board_display_status
         self.board_locked = bool(locked)
-        self.stage5.on_board_lock_changed(bool(locked))
-        self._sync_stage5_from_main(reason="board_status")
+        LOGGER.info("[STAGE5][BOARD_SYNC] locked=%s", int(bool(locked)))
+        self._sync_stage5_context(reason="board_status")
         self.target_visible = bool(target_visible)
         self.board_display_status = display_status
         self.corner_status = corner_status
@@ -455,6 +469,9 @@ class MainWindow(QMainWindow):
     def _log_transition(self, transition: tuple[ArmState, ArmState]) -> None:
         previous, target = transition
         LOGGER.info("STATE %s -> %s", previous.value, target.value)
+        LOGGER.info("[STAGE5][ARM_SYNC] state=%s", target.value)
+        # Keep Stage5 arm context aligned with every main arm transition.
+        self._sync_stage5_context(reason=f"arm_transition:{previous.value}->{target.value}")
 
     def _refresh_ui(self, *, current_action: str | None = None) -> None:
         snapshot = self.state_machine.snapshot()
@@ -480,6 +497,10 @@ class MainWindow(QMainWindow):
             board_locked=self.board_locked,
             target_visible=self.target_visible,
         )
+        # Always re-pull Stage5 context from the live main system and push to the panel.
+        # Without this, Stage5 can be READY internally while the UI stays DISCONNECTED.
+        self._sync_stage5_context(reason="refresh_ui")
+        self._refresh_stage5_ui()
 
 
     def _on_board_geometry(self, payload: object) -> None:
@@ -708,6 +729,7 @@ class MainWindow(QMainWindow):
                 # Keep arm ESTOP until user uses existing flow (return observe after reconnect).
                 pass
             self.stage5.recover()
+            self._sync_stage5_context(reason="recover")
             if self.camera_worker is not None:
                 self.camera_worker.set_selected_target(None, None)
             self.camera_panel.set_target_text("当前目标坐标：-")
@@ -717,29 +739,53 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "恢复", str(exc))
 
 
-    def _sync_stage5_from_main(self, *, reason: str = "") -> None:
+    def _sync_stage5_context(self, *, reason: str = "") -> None:
+        """Single source of truth: pull live COM/board/arm/estop into Stage5."""
         arm = self.state_machine.snapshot()
-        estop = arm.state == ArmState.ESTOP
-        self.stage5.sync_from_main(
-            serial_connected=self.controller.is_connected,
-            board_locked=self.board_locked,
-            arm_state_name=arm.state.value,
-            estop=estop,
+        serial_connected = bool(self.controller is not None and self.controller.is_connected)
+        board_locked = bool(self.board_locked)
+        estop = arm.state == ArmState.ESTOP or self.stage5.stage_state.snapshot().state == Stage5State.EMERGENCY_STOP
+        # If arm is ESTOP, force estop flag; otherwise only keep latched Stage5 ESTOP until recover.
+        if arm.state == ArmState.ESTOP:
+            estop = True
+        elif self.stage5.stage_state.snapshot().state != Stage5State.EMERGENCY_STOP:
+            estop = False
+
+        before = self.stage5.stage_state.state
+        self.stage5.update_context(
+            serial_connected=serial_connected,
+            board_locked=board_locked,
+            arm_state=arm.state,
+            emergency_stopped=estop,
         )
-        if reason:
+        after = self.stage5.stage_state.state
+        # Avoid flooding logs on high-frequency refresh_ui; always log transitions.
+        if reason != "refresh_ui" or before != after:
             LOGGER.info(
-                "[STAGE5][SYNC] reason=%s serial=%s board=%s arm=%s stage5=%s",
-                reason,
-                int(self.controller.is_connected),
-                int(self.board_locked),
+                "[STAGE5][SYNC] reason=%s serial=%s board=%s arm=%s estop=%s stage5=%s->%s same_controller=%s",
+                reason or "-",
+                int(serial_connected),
+                int(board_locked),
                 arm.state.value,
-                self.stage5.stage_state.state.value,
+                int(estop),
+                before.value,
+                after.value,
+                int(self.stage5.controller is self.controller),
             )
+        if after == Stage5State.DISCONNECTED and serial_connected:
+            LOGGER.warning(
+                "[STAGE5][STATE_BLOCKED] reason=UNEXPECTED_DISCONNECTED serial=1 board=%s arm=%s",
+                int(board_locked),
+                arm.state.value,
+            )
+        if after == Stage5State.DISCONNECTED and not serial_connected:
+            LOGGER.info("[STAGE5][STATE_BLOCKED] reason=SERIAL_NOT_CONNECTED")
 
     def _refresh_stage5_ui(self) -> None:
         snap = self.stage5.stage_state.snapshot()
         target = self.stage5.target
         panel = self.control_panel.stage5_panel
+        arm = self.state_machine.snapshot()
         if target.pwm:
             panel.set_pwm_values(target.pwm)
         panel.update_target_view(
@@ -754,7 +800,14 @@ class MainWindow(QMainWindow):
             pwm_text=target.pwm_text,
             verified_runs=target.verified_runs,
         )
-        arm = self.state_machine.snapshot()
+        panel.update_sync_diagnostics(
+            serial_sync=bool(self.controller.is_connected),
+            board_sync=bool(self.board_locked),
+            arm_sync=arm.state.value,
+            estop=arm.state == ArmState.ESTOP or snap.state == Stage5State.EMERGENCY_STOP,
+            controller_shared=self.stage5.controller is self.controller,
+            blocked_reason=self.stage5.blocked_reason(),
+        )
         panel.set_enabled_state(
             serial_connected=self.controller.is_connected,
             board_locked=self.board_locked,

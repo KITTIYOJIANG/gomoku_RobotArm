@@ -24,6 +24,17 @@ from app.stage5.state_machine import Stage5State, Stage5StateMachine
 LOGGER = logging.getLogger(__name__)
 
 
+def _normalize_arm_state(arm_state: object) -> str:
+    if arm_state is None:
+        return "UNKNOWN"
+    if hasattr(arm_state, "value"):
+        return str(getattr(arm_state, "value"))
+    text = str(arm_state)
+    if "." in text:
+        text = text.split(".")[-1]
+    return text.strip()
+
+
 @dataclass
 class TargetView:
     row: int | None = None
@@ -113,22 +124,66 @@ class Stage5Coordinator:
         estop: bool = False,
     ) -> None:
         """Full resync used after connect/return/board events."""
+        self.update_context(
+            serial_connected=serial_connected,
+            board_locked=board_locked,
+            arm_state=arm_state_name,
+            emergency_stopped=estop,
+        )
+
+    def update_context(
+        self,
+        *,
+        serial_connected: bool,
+        board_locked: bool,
+        arm_state: object,
+        emergency_stopped: bool,
+    ) -> None:
+        """Canonical Stage5 context update from MainWindow live facts."""
+        arm_name = _normalize_arm_state(arm_state)
+        self.serial_connected = bool(serial_connected)
         self.board_locked = bool(board_locked)
-        ready = arm_state_name in {"OBSERVE_IDLE", "OBSERVE_HOLD"}
+        self.arm_state_name = arm_name
+        self.emergency_stopped = bool(emergency_stopped)
+        ready = arm_name in {"OBSERVE_IDLE", "OBSERVE_HOLD", "READY"}
+        previous = self.stage_state.state
         state = self.stage_state.sync_context(
-            serial_connected=bool(serial_connected),
-            board_locked=bool(board_locked),
+            serial_connected=self.serial_connected,
+            board_locked=self.board_locked,
             arm_ready=ready,
-            estop=bool(estop),
+            estop=self.emergency_stopped,
         )
         self.logger.log(
             "FULL_SYNC",
-            serial=int(serial_connected),
-            board=int(board_locked),
-            arm=arm_state_name,
-            estop=int(estop),
+            serial=int(self.serial_connected),
+            board=int(self.board_locked),
+            arm=arm_name,
+            estop=int(self.emergency_stopped),
             stage5=state.value,
+            controller_id=id(self.controller),
         )
+        if previous != state:
+            LOGGER.info("[STAGE5][STATE] %s -> %s", previous.value, state.value)
+        if state.value == "DISCONNECTED" and not self.serial_connected:
+            LOGGER.info("[STAGE5][STATE_BLOCKED] reason=SERIAL_NOT_CONNECTED")
+        elif state.value == "BOARD_NOT_LOCKED":
+            LOGGER.info("[STAGE5][STATE_BLOCKED] reason=BOARD_NOT_LOCKED")
+        elif state.value == "IDLE":
+            LOGGER.info("[STAGE5][STATE_BLOCKED] reason=ARM_NOT_READY arm=%s", arm_name)
+
+    def blocked_reason(self) -> str:
+        snap = self.stage_state.snapshot()
+        if snap.state.value == "DISCONNECTED":
+            return "SERIAL_NOT_CONNECTED"
+        if snap.state.value == "EMERGENCY_STOP":
+            return "ESTOP"
+        if snap.state.value == "BOARD_NOT_LOCKED":
+            return "BOARD_NOT_LOCKED"
+        if snap.state.value == "IDLE":
+            return f"ARM_NOT_READY:{getattr(self, 'arm_state_name', '?')}"
+        if snap.state.value == "TARGET_UNCALIBRATED":
+            return "TARGET_UNCALIBRATED"
+        return ""
 
     def update_geometry(self, payload: dict[str, Any]) -> None:
         if self.stage_state.is_moving() or self.stage_state.state == Stage5State.HOVERING:

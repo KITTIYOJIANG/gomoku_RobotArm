@@ -44,6 +44,12 @@ class Stage5Panel(QWidget):
         self.state_label = QLabel("Stage5: DISCONNECTED")
         self.verified_label = QLabel("verified_runs: 0")
         self.source_label = QLabel("来源: -")
+        self.serial_sync_label = QLabel("Serial Sync: FALSE")
+        self.board_sync_label = QLabel("Board Sync: FALSE")
+        self.arm_sync_label = QLabel("Arm Sync: -")
+        self.estop_sync_label = QLabel("E-Stop: FALSE")
+        self.controller_shared_label = QLabel("Controller Shared: -")
+        self.blocked_label = QLabel("Blocked: -")
 
         self.dry_run_checkbox = QCheckBox("DRY RUN（默认开启，关闭后才允许实机发送）")
         self.dry_run_checkbox.setChecked(bool(default_dry_run))
@@ -101,6 +107,12 @@ class Stage5Panel(QWidget):
         info.addRow(self.source_label)
         info.addRow(self.pwm_label)
         info.addRow(self.verified_label)
+        info.addRow(self.serial_sync_label)
+        info.addRow(self.board_sync_label)
+        info.addRow(self.arm_sync_label)
+        info.addRow(self.estop_sync_label)
+        info.addRow(self.controller_shared_label)
+        info.addRow(self.blocked_label)
 
         move_row = QHBoxLayout()
         move_row.addWidget(self.hover_button)
@@ -190,6 +202,26 @@ class Stage5Panel(QWidget):
         self.pwm_label.setText(f"PWM预览: {pwm_text}")
         self.verified_label.setText(f"verified_runs: {verified_runs}")
 
+
+    def update_sync_diagnostics(
+        self,
+        *,
+        serial_sync: bool,
+        board_sync: bool,
+        arm_sync: str,
+        estop: bool,
+        controller_shared: bool,
+        blocked_reason: str = "",
+    ) -> None:
+        self.serial_sync_label.setText(f"Serial Sync: {'TRUE' if serial_sync else 'FALSE'}")
+        self.board_sync_label.setText(f"Board Sync: {'TRUE' if board_sync else 'FALSE'}")
+        self.arm_sync_label.setText(f"Arm Sync: {arm_sync}")
+        self.estop_sync_label.setText(f"E-Stop: {'TRUE' if estop else 'FALSE'}")
+        self.controller_shared_label.setText(
+            f"Controller Shared: {'TRUE' if controller_shared else 'FALSE'}"
+        )
+        self.blocked_label.setText(f"Blocked: {blocked_reason or '-'}")
+
     def set_enabled_state(
         self,
         *,
@@ -203,7 +235,8 @@ class Stage5Panel(QWidget):
     ) -> None:
         ordinary = serial_connected and not busy and not estop
         # DRY RUN toggle must remain operable for inspection even when DISCONNECTED.
-        self.dry_run_checkbox.setEnabled(not busy)
+        # Always allow inspecting/toggling DRY RUN, including DISCONNECTED.
+        self.dry_run_checkbox.setEnabled(True)
         self.hover_button.setEnabled(ordinary and can_hover)
         self.return_button.setEnabled(ordinary and can_return)
         self.clear_button.setEnabled(ordinary and has_target)
