@@ -310,6 +310,8 @@ class MainWindow(QMainWindow):
             LOGGER.error("ESTOP WRITE FAILED: %s", exc)
         transition = self.state_machine.estop()
         self._log_transition(transition)
+        self.stage5.estop()
+        self._sync_stage5_from_main(reason="estop")
         self._set_camera_arm_busy(False)
         LOGGER.critical("EMERGENCY STOP LATCHED")
         self._refresh_ui()
