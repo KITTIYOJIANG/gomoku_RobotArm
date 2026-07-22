@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "detection_interval_frames": 4,
+  "coordinate_convention": "row_down_col_right_zero_based",
+  "tracker": {
+    "corner_smoothing_alpha": 0.35,
+    "consecutive_failure_limit": 5,
+    "lost_timeout_seconds": 2.0
+  },
+  "piece_recognition": {
+    "roi_radius": 10,
+    "background_radius": 24,
+    "black_diff": 45.0,
+    "white_diff": 35.0,
+    "black_area_ratio": 0.45,
+    "white_area_ratio": 0.35
+  },
+  "target": {
+    "name": "P77",
+    "row": 7,
+    "col": 7
+  },
+  "apriltag_layout": "config/apriltag_board.json",
+  "grid_config": "config/vision_grid.json",
+  "camera_intrinsics": "config/camera_intrinsics.json",
+  "camera_intrinsics_fallback": "config/camera_intrinsics.example.json",
+  "legacy_board_corners": "calibration/legacy_board_corners.json"
+}

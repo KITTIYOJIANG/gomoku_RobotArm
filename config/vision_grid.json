@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "board_size": 15,
+  "board_margin_x": 1.0,
+  "board_margin_y": 1.0,
+  "grid_offset_x": 0.0,
+  "grid_offset_y": 0.0,
+  "grid_scale_x": 1.0,
+  "grid_scale_y": 1.0,
+  "roi_radius": 14,
+  "center_radius": 3,
+  "edge_radius": 12,
+  "cell_overrides": {},
+  "notes": [
+    "All points are generated only in the rectified standard-board image.",
+    "Coordinates use row down, col right, with top-left equal to (0,0).",
+    "Per-cell offset and roi_radius overrides use keys formatted as row,col."
+  ]
+}

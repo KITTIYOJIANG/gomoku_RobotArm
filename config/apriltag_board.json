@@ -1,0 +1,53 @@
+{
+  "schema_version": 1,
+  "layout_name": "physical_gomoku_board_bootstrap",
+  "tag_family": "tag16h5",
+  "tag_size_mm": null,
+  "board_width_mm": null,
+  "board_height_mm": null,
+  "tag_size_board_units": [0.03, 0.03],
+  "tags": {
+    "15": {
+      "role": "top_left",
+      "center_board": [0.0, 0.0],
+      "rotation_deg": 0.0
+    },
+    "16": {
+      "role": "top_right",
+      "center_board": [1.0, 0.0],
+      "rotation_deg": 0.0
+    },
+    "17": {
+      "role": "bottom_right",
+      "center_board": [1.0, 1.0],
+      "rotation_deg": 0.0
+    },
+    "18": {
+      "role": "bottom_left",
+      "center_board": [0.0, 1.0],
+      "rotation_deg": 0.0
+    }
+  },
+  "playable_corners_board": [
+    [0.02, 0.03],
+    [0.972, 0.03],
+    [0.972, 0.972],
+    [0.02, 0.972]
+  ],
+  "minimum_tag_count": 3,
+  "minimum_decision_margin": 20.0,
+  "maximum_hamming": 0,
+  "maximum_reprojection_error": 3.0,
+  "minimum_board_area_ratio": 0.05,
+  "maximum_board_area_ratio": 0.95,
+  "pose_jump_threshold": 15.0,
+  "homography_jump_threshold": 25.0,
+  "stable_frame_count": 3,
+  "warp_width_px": 600,
+  "warp_height_px": 600,
+  "notes": [
+    "IDs follow the installed board: 15=TL, 16=TR, 17=BR, 18=BL.",
+    "The current bootstrap layout is normalized for 2D homography only.",
+    "Measure tag_size_mm and board dimensions before enabling metric pose estimation."
+  ]
+}

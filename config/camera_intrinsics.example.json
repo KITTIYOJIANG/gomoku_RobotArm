@@ -1,0 +1,10 @@
+{
+  "schema_version": 1,
+  "camera_name": "USB 2.0 Camera",
+  "image_width": 1920,
+  "image_height": 1080,
+  "camera_matrix": null,
+  "dist_coeffs": null,
+  "calibration_rms": null,
+  "status": "CAMERA_INTRINSICS_MISSING"
+}

@@ -1,0 +1,24 @@
+{
+  "camera_id": 0,
+  "camera_name": "USB 2.0 Camera",
+  "corners": [
+    [
+      129.0,
+      20.0
+    ],
+    [
+      586.0,
+      17.0
+    ],
+    [
+      586.0,
+      462.0
+    ],
+    [
+      130.0,
+      464.0
+    ]
+  ],
+  "corners_text": "129,20;586,17;586,462;130,464",
+  "note": "Local board calibration. Regenerate after moving the camera."
+}
