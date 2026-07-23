@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QCloseEvent
@@ -23,6 +24,12 @@ from app.stage5.coordinator import Stage5Coordinator
 from app.stage5.cross_anchor_wizard import CrossAnchorWizard, UserTestResult
 from app.stage5.candidate_store import CandidateStore
 from app.learning.hover_sample_store import HoverSampleStore
+from app.learning.hover_dataset import VerifiedHoverPoseDataset
+from app.learning.hover_predictor import HoverPosePredictor
+from app.learning.hover_comparator import HoverPoseComparator
+from app.learning.hover_trainer import TrainConfig, train_hover_pose
+from app.learning import MODEL_LIVE_CONTROL_ENABLED
+from app.stage5.safety import derive_pwm_safety_limits
 from app.stage5.constants import FORCE_STAGE5_DRY_RUN
 from app.stage5.state_machine import Stage5Invalid, Stage5State
 from app.gui.camera_panel import CameraPanel
@@ -98,7 +105,17 @@ class MainWindow(QMainWindow):
             force_dry_run=bool(getattr(config.stage5, "force_dry_run", FORCE_STAGE5_DRY_RUN)),
         )
         self._cross_last_plan = None
+        self._samples_path = Path(sample_path)
+        self._model_dir = self.config.logs_dir.parent / "models" / "hover_pose"
+        self.hover_predictor = HoverPosePredictor(
+            model_path=self._model_dir / "hover_pose_net_latest.pt",
+            normalizer_path=self._model_dir / "hover_normalizer_latest.json",
+            board_size=self.config.vision.board_size,
+            limits=derive_pwm_safety_limits(self.actions),
+        )
+        self.hover_comparator = HoverPoseComparator(self.stage5.store, limits=derive_pwm_safety_limits(self.actions))
         LOGGER.info("[STAGE5][FORCE_DRY_RUN] enabled=%s", int(FORCE_STAGE5_DRY_RUN))
+        LOGGER.info("[LEARNING] MODEL_LIVE_CONTROL_ENABLED=%s", MODEL_LIVE_CONTROL_ENABLED)
 
         self.camera_panel = CameraPanel()
         self.control_panel = ControlPanel(
@@ -166,6 +183,7 @@ class MainWindow(QMainWindow):
         s5.recover_requested.connect(self.stage5_recover)
         s5.estop_requested.connect(self.emergency_stop)
         self._connect_cross_anchor_signals()
+        self._connect_learning_signals()
 
         self.arm_worker.sequence_started.connect(self._on_sequence_started)
         self.arm_worker.step_started.connect(self._on_step_started)
@@ -908,6 +926,155 @@ class MainWindow(QMainWindow):
     def _refresh_cross_panel(self) -> None:
         snap = self.cross_wizard.status_snapshot()
         self.control_panel.cross_anchor_panel.update_view(snap)
+
+
+    def _connect_learning_signals(self) -> None:
+        panel = self.control_panel.hover_learning_panel
+        panel.sync_p77_preview_requested.connect(lambda: self._learning_sync_p77(apply=False))
+        panel.sync_p77_apply_requested.connect(lambda: self._learning_sync_p77(apply=True))
+        panel.train_smoke_requested.connect(self._learning_train_smoke)
+        panel.load_model_requested.connect(self._learning_load_model)
+        panel.predict_current_target_requested.connect(self._learning_predict_target)
+        panel.compare_requested.connect(self._learning_compare)
+        panel.inspect_dataset_requested.connect(self._learning_inspect)
+        self._refresh_learning_panel()
+
+    def _learning_dataset(self) -> VerifiedHoverPoseDataset:
+        return VerifiedHoverPoseDataset(
+            self._samples_path,
+            min_verified_runs=1,
+            latest_per_coordinate=True,
+        )
+
+    def _refresh_learning_panel(self) -> None:
+        ds = self._learning_dataset()
+        shadow = "-"
+        preferred = "-"
+        delta = "-"
+        gen = ds.manifest().get("generalization_valid")
+        model_loaded = self.hover_predictor.model is not None
+        self.control_panel.hover_learning_panel.update_status(
+            n_samples=len(ds),
+            n_coords=len(ds.unique_coordinates()),
+            model_loaded=model_loaded,
+            generalization_valid=gen,
+            shadow_text=shadow,
+            preferred=preferred,
+            delta_text=delta,
+        )
+
+    def _learning_sync_p77(self, *, apply: bool) -> None:
+        panel = self.control_panel.hover_learning_panel
+        try:
+            import json
+            from datetime import datetime
+            calib = self.stage5.store.to_public_dict()
+            anchor = (calib.get("anchors") or {}).get("7,7")
+            if not anchor or not anchor.get("calibrated"):
+                panel.append_log("P77 not calibrated in formal JSON")
+                return
+            pwm = {j: int(anchor["pwm"][j]) for j in ["000", "001", "002", "003", "004"]}
+            if not apply:
+                panel.append_log(f"PREVIEW sync P(7,7) pwm={pwm} (no write)")
+                return
+            store = HoverSampleStore(self._samples_path)
+            rec = store.add_sample(
+                row=7,
+                col=7,
+                pwm=pwm,
+                verified_runs=max(int(anchor.get("verified_runs", 1)), 1),
+                safe_return_completed=True,
+                emergency_stop=False,
+                calibration_version=f"gui_sync_{datetime.now():%Y%m%d}",
+            )
+            if rec is None:
+                panel.append_log("P77 already present (duplicate fingerprint)")
+            else:
+                panel.append_log(f"P77 sample added {rec['sample_id']}")
+            self._refresh_learning_panel()
+        except Exception as exc:
+            panel.append_log(f"ERROR sync: {exc}")
+
+    def _learning_train_smoke(self) -> None:
+        panel = self.control_panel.hover_learning_panel
+        try:
+            result = train_hover_pose(
+                self._samples_path,
+                self._model_dir,
+                TrainConfig(smoke_test=True, epochs=200, latest_per_coordinate=True, min_verified_runs=1),
+            )
+            panel.append_log(
+                f"TRAIN smoke loss={result.final_loss:.6f} samples={result.n_samples} "
+                f"coords={result.n_unique_coords} gen_valid={result.generalization_valid} "
+                f"params={result.parameter_count}"
+            )
+            panel.append_log(f"model={result.model_path.name}")
+            panel.append_log("MODEL_LIVE_CONTROL_ENABLED=false")
+            self._learning_load_model()
+        except Exception as exc:
+            panel.append_log(f"ERROR train: {exc}")
+        self._refresh_learning_panel()
+
+    def _learning_load_model(self) -> None:
+        panel = self.control_panel.hover_learning_panel
+        try:
+            model = self._model_dir / "hover_pose_net_latest.pt"
+            norm = self._model_dir / "hover_normalizer_latest.json"
+            if not model.exists() or not norm.exists():
+                panel.append_log("No latest model; run smoke train first")
+                return
+            self.hover_predictor.load(model, norm)
+            panel.append_log(f"loaded {model.name}")
+        except Exception as exc:
+            panel.append_log(f"ERROR load model: {exc}")
+        self._refresh_learning_panel()
+
+    def _learning_predict_target(self) -> None:
+        panel = self.control_panel.hover_learning_panel
+        target = self.stage5.target
+        row = target.row if target.row is not None else 7
+        col = target.col if target.col is not None else 7
+        pred = self.hover_predictor.predict(row, col)
+        panel.append_log(f"SHADOW P({row},{col}) status={pred.status.value} pwm={pred.pwm} msg={pred.message}")
+        panel.append_log("MODEL_LIVE_CONTROL_ENABLED=false (shadow only, no serial)")
+        self.control_panel.hover_learning_panel.update_status(
+            n_samples=len(self._learning_dataset()),
+            n_coords=len(self._learning_dataset().unique_coordinates()),
+            model_loaded=self.hover_predictor.model is not None,
+            generalization_valid=self._learning_dataset().manifest().get("generalization_valid"),
+            shadow_text=str(pred.pwm) if pred.pwm else pred.status.value,
+            preferred="pytorch_shadow" if pred.pwm else "-",
+            delta_text="-",
+        )
+
+    def _learning_compare(self) -> None:
+        panel = self.control_panel.hover_learning_panel
+        target = self.stage5.target
+        row = target.row if target.row is not None else 7
+        col = target.col if target.col is not None else 7
+        shadow = self.hover_predictor.predict(row, col)
+        cmp = self.hover_comparator.compare(row, col, shadow)
+        panel.append_log(f"COMPARE P({row},{col}) preferred={cmp.preferred_source}")
+        for name, payload in cmp.sources.items():
+            panel.append_log(f"  {name}: {payload}")
+        panel.append_log(f"deltas={cmp.max_abs_delta_vs_preferred}")
+        self.control_panel.hover_learning_panel.update_status(
+            n_samples=len(self._learning_dataset()),
+            n_coords=len(self._learning_dataset().unique_coordinates()),
+            model_loaded=self.hover_predictor.model is not None,
+            generalization_valid=self._learning_dataset().manifest().get("generalization_valid"),
+            shadow_text=str(shadow.pwm) if shadow.pwm else shadow.status.value,
+            preferred=str(cmp.preferred_source),
+            delta_text=str(cmp.max_abs_delta_vs_preferred),
+        )
+
+    def _learning_inspect(self) -> None:
+        panel = self.control_panel.hover_learning_panel
+        ds = self._learning_dataset()
+        m = ds.manifest()
+        panel.append_log(f"dataset samples={m['n_samples']} coords={m['n_unique_coords']} ids={m['sample_ids']}")
+        panel.append_log(f"generalization_valid={m['generalization_valid']}")
+        self._refresh_learning_panel()
 
     def _sync_stage5_context(self, *, reason: str = "") -> None:
         """Single source of truth: pull live COM/board/arm/estop into Stage5."""
