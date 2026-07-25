@@ -93,3 +93,22 @@ def validate_spatial_pwm(pwm: Mapping[int | str, int], limits: PwmSafetyLimits) 
                 f"{limits.joint_min[jid]}..{limits.joint_max[jid]}"
             )
     return errors
+
+
+def derive_calibration_limits(library: ActionLibrary) -> PwmSafetyLimits:
+    """Wide envelope for manual teaching. Blocks only near absolute protocol bounds.
+
+    Factory poses form a tight cloud; real cross-board points (e.g. joint002=720)
+    must still be savable after human verification.
+    """
+    # Teaching range: full protocol with a small pad kept at ends for sanity.
+    pad = 50
+    joint_min = {jid: library.pwm_min + pad for jid in SPATIAL_JOINT_IDS}  # e.g. 550
+    joint_max = {jid: library.pwm_max - pad for jid in SPATIAL_JOINT_IDS}  # e.g. 2450
+    return PwmSafetyLimits(
+        pwm_min=library.pwm_min,
+        pwm_max=library.pwm_max,
+        joint_min=joint_min,
+        joint_max=joint_max,
+        max_adjacent_delta={jid: 500 for jid in SPATIAL_JOINT_IDS},
+    )

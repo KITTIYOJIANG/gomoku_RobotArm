@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Mapping
@@ -49,7 +49,15 @@ def interpolate_target_pwm(
     *,
     limits: PwmSafetyLimits | None = None,
 ) -> InterpolationResult:
-    """Resolve TARGET_ABOVE PWM for (row, col) via direct anchor or bilinear cells."""
+    """Resolve TARGET_ABOVE PWM.
+
+    Priority:
+      1) direct calibrated taught point (user fine-tune / confirmed)
+      2) bilinear on the tightest rectangle of *calibrated* anchors
+      3) (not used here) caller may fall back to star-corner estimate
+    Untaught points use default interpolation and are treated as accurate enough
+    until the user overrides them.
+    """
     target_row = int(row)
     target_col = int(col)
     board_size = store.board_size
@@ -67,6 +75,7 @@ def interpolate_target_pwm(
             f"r{region['row_min']}..{region['row_max']} c{region['col_min']}..{region['col_max']}",
         )
 
+    # --- Priority 1: direct taught / calibrated anchor ---
     direct = store.get_anchor(target_row, target_col)
     if direct is not None and direct.calibrated:
         pwm = direct.spatial_pwm()
@@ -83,20 +92,36 @@ def interpolate_target_pwm(
             anchors_used=(direct.key,),
             u=None,
             v=None,
-            details={"pose_type": direct.pose_type},
+            details={"pose_type": direct.pose_type, "priority": 1},
         )
 
-    r1, r2, c1, c2 = _enclosing_cell(store.anchor_rows, store.anchor_cols, target_row, target_col)
-    keys = (f"{r1},{c1}", f"{r1},{c2}", f"{r2},{c1}", f"{r2},{c2}")
-    corners: dict[str, AnchorPose] = {}
-    for key in keys:
-        anchor = store.anchors().get(key)
-        if anchor is None or not anchor.calibrated:
-            raise InterpolationError(
-                "TARGET_UNCALIBRATED",
-                f"missing calibrated corner anchor {key} for ({target_row},{target_col})",
+    calibrated = store.calibrated_anchors()
+    if not calibrated:
+        raise InterpolationError("TARGET_UNCALIBRATED", "no calibrated anchors")
+
+    cell = _enclosing_calibrated_cell(calibrated, target_row, target_col)
+    if cell is None:
+        # Fall back to configured grid (legacy) for compatibility.
+        try:
+            r1, r2, c1, c2 = _enclosing_cell(
+                store.anchor_rows, store.anchor_cols, target_row, target_col
             )
-        corners[key] = anchor
+            keys = (f"{r1},{c1}", f"{r1},{c2}", f"{r2},{c1}", f"{r2},{c2}")
+            if not all(k in calibrated for k in keys):
+                raise InterpolationError(
+                    "TARGET_UNCALIBRATED",
+                    f"missing calibrated corners for ({target_row},{target_col}); "
+                    "teach star corners or nearby fine-tune points",
+                )
+            cell = (r1, r2, c1, c2)
+        except InterpolationError:
+            raise
+        except Exception as exc:
+            raise InterpolationError("TARGET_UNCALIBRATED", str(exc)) from exc
+
+    r1, r2, c1, c2 = cell
+    keys = (f"{r1},{c1}", f"{r1},{c2}", f"{r2},{c1}", f"{r2},{c2}")
+    corners = {k: calibrated[k] for k in keys}
 
     if c2 == c1:
         u = 0.0
@@ -106,11 +131,6 @@ def interpolate_target_pwm(
         v = 0.0
     else:
         v = (target_row - r1) / (r2 - r1)
-    if not (0.0 <= u <= 1.0 and 0.0 <= v <= 1.0):
-        raise InterpolationError(
-            "TARGET_OUTSIDE_CALIBRATED_REGION",
-            f"({target_row},{target_col}) requires extrapolation u={u:.3f} v={v:.3f}",
-        )
 
     q11 = corners[f"{r1},{c1}"].spatial_pwm()
     q12 = corners[f"{r1},{c2}"].spatial_pwm()
@@ -150,8 +170,249 @@ def interpolate_target_pwm(
             "r2": r2,
             "c1": c1,
             "c2": c2,
+            "priority": 2,
+            "note": "default_interpolated_not_user_taught",
         },
     )
+
+
+def estimate_star_corner_pwm(
+    store: CalibrationStore,
+    row: int,
+    col: int,
+) -> InterpolationResult:
+    """Parallelogram seed for a star corner from P77 + cross arms.
+
+    For UL (3,3):  P(3,3) ≈ P(3,7) + P(7,3) - P(7,7)
+    Similarly for other corners using the nearest cross mid-edge anchors.
+    """
+    r = int(row)
+    c = int(col)
+    # Choose reference edges on the cross (row center=7, col center=7).
+    center = store.get_anchor(7, 7)
+    edge_row = store.get_anchor(r, 7)  # same row as corner, center col
+    edge_col = store.get_anchor(7, c)  # center row, same col as corner
+    missing = []
+    if center is None or not center.calibrated:
+        missing.append("7,7")
+    if edge_row is None or not edge_row.calibrated:
+        missing.append(f"{r},7")
+    if edge_col is None or not edge_col.calibrated:
+        missing.append(f"7,{c}")
+    if missing:
+        raise InterpolationError(
+            "STAR_SEED_MISSING",
+            f"cannot seed P({r},{c}); need calibrated {', '.join(missing)}",
+        )
+
+    assert center is not None and edge_row is not None and edge_col is not None
+    c_pwm = center.spatial_pwm()
+    er_pwm = edge_row.spatial_pwm()
+    ec_pwm = edge_col.spatial_pwm()
+    pwm: dict[int, int] = {}
+    for jid in SPATIAL_JOINT_IDS:
+        # Parallelogram completion in joint PWM space (seed only).
+        value = int(er_pwm[jid]) + int(ec_pwm[jid]) - int(c_pwm[jid])
+        pwm[jid] = max(500, min(2500, value))
+    return InterpolationResult(
+        row=r,
+        col=c,
+        source="star_parallelogram_seed",
+        pwm=pwm,
+        time_ms=1000,
+        anchors_used=(center.key, edge_row.key, edge_col.key),
+        u=None,
+        v=None,
+        details={"method": "p_rc = p_r7 + p_7c - p_77", "priority": 0},
+    )
+
+
+
+def estimate_outer_ring_pwm(
+    store: CalibrationStore,
+    row: int,
+    col: int,
+) -> InterpolationResult:
+    """Seed PWM for outer-ring points by linear extrapolation from center lattice.
+
+    Preferred path:
+      - edge mid (0,7)/(14,7)/(7,0)/(7,14): extrapolate along the cross from P77 + inner edge
+      - board corners: parallelogram from outer edge mids + P77 once available,
+        else from inner star corner + cross.
+    """
+    r, c = int(row), int(col)
+    calibrated = store.calibrated_anchors()
+
+    def need(rr: int, cc: int) -> AnchorPose:
+        key = f"{rr},{cc}"
+        a = calibrated.get(key) or store.get_anchor(rr, cc)
+        if a is None or not a.calibrated:
+            raise InterpolationError("OUTER_SEED_MISSING", f"need calibrated P({rr},{cc})")
+        return a
+
+    def spatial(a: AnchorPose) -> dict[int, int]:
+        return a.spatial_pwm()
+
+    def blend(a: dict[int, int], b: dict[int, int], t: float) -> dict[int, int]:
+        # extrapolate: p = a + (a-b)*scale where t is factor on (a-b)
+        out: dict[int, int] = {}
+        for jid in SPATIAL_JOINT_IDS:
+            val = int(round(a[jid] + (a[jid] - b[jid]) * t))
+            out[jid] = max(550, min(2450, val))
+        return out
+
+    used: list[str] = []
+    method = ""
+
+    # --- cross outer mids ---
+    if (r, c) == (0, 7):
+        # from P(3,7) away from P(7,7): distance 3 beyond span 4 → factor 3/4
+        inner, hub = need(3, 7), need(7, 7)
+        pwm = blend(spatial(inner), spatial(hub), 3.0 / 4.0)
+        used, method = [inner.key, hub.key], "extrap_top"
+    elif (r, c) == (14, 7):
+        inner, hub = need(11, 7), need(7, 7)
+        pwm = blend(spatial(inner), spatial(hub), 3.0 / 4.0)
+        used, method = [inner.key, hub.key], "extrap_bottom"
+    elif (r, c) == (7, 0):
+        inner, hub = need(7, 3), need(7, 7)
+        pwm = blend(spatial(inner), spatial(hub), 3.0 / 4.0)
+        used, method = [inner.key, hub.key], "extrap_left"
+    elif (r, c) == (7, 14):
+        inner, hub = need(7, 11), need(7, 7)
+        pwm = blend(spatial(inner), spatial(hub), 3.0 / 4.0)
+        used, method = [inner.key, hub.key], "extrap_right"
+    # --- board corners: prefer outer mids parallelogram, else star+cross ---
+    elif (r, c) == (0, 0):
+        try:
+            top, left, hub = need(0, 7), need(7, 0), need(7, 7)
+            pwm = {
+                j: max(550, min(2450, spatial(top)[j] + spatial(left)[j] - spatial(hub)[j]))
+                for j in SPATIAL_JOINT_IDS
+            }
+            used, method = [top.key, left.key, hub.key], "para_outer_ul"
+        except InterpolationError:
+            star, er, ec, hub = need(3, 3), need(3, 7), need(7, 3), need(7, 7)
+            # extrapolate star corner outward similarly on both axes
+            # p00 ≈ p33 + (p33-p77) * (3/4) roughly via edges
+            s, h = spatial(star), spatial(hub)
+            pwm = {j: max(550, min(2450, int(round(s[j] + (s[j] - h[j]) * 0.75)))) for j in SPATIAL_JOINT_IDS}
+            used, method = [star.key, hub.key], "extrap_star_ul"
+    elif (r, c) == (0, 14):
+        try:
+            top, right, hub = need(0, 7), need(7, 14), need(7, 7)
+            pwm = {
+                j: max(550, min(2450, spatial(top)[j] + spatial(right)[j] - spatial(hub)[j]))
+                for j in SPATIAL_JOINT_IDS
+            }
+            used, method = [top.key, right.key, hub.key], "para_outer_ur"
+        except InterpolationError:
+            star, hub = need(3, 11), need(7, 7)
+            s, h = spatial(star), spatial(hub)
+            pwm = {j: max(550, min(2450, int(round(s[j] + (s[j] - h[j]) * 0.75)))) for j in SPATIAL_JOINT_IDS}
+            used, method = [star.key, hub.key], "extrap_star_ur"
+    elif (r, c) == (14, 0):
+        try:
+            bot, left, hub = need(14, 7), need(7, 0), need(7, 7)
+            pwm = {
+                j: max(550, min(2450, spatial(bot)[j] + spatial(left)[j] - spatial(hub)[j]))
+                for j in SPATIAL_JOINT_IDS
+            }
+            used, method = [bot.key, left.key, hub.key], "para_outer_dl"
+        except InterpolationError:
+            star, hub = need(11, 3), need(7, 7)
+            s, h = spatial(star), spatial(hub)
+            pwm = {j: max(550, min(2450, int(round(s[j] + (s[j] - h[j]) * 0.75)))) for j in SPATIAL_JOINT_IDS}
+            used, method = [star.key, hub.key], "extrap_star_dl"
+    elif (r, c) == (14, 14):
+        try:
+            bot, right, hub = need(14, 7), need(7, 14), need(7, 7)
+            pwm = {
+                j: max(550, min(2450, spatial(bot)[j] + spatial(right)[j] - spatial(hub)[j]))
+                for j in SPATIAL_JOINT_IDS
+            }
+            used, method = [bot.key, right.key, hub.key], "para_outer_dr"
+        except InterpolationError:
+            star, hub = need(11, 11), need(7, 7)
+            s, h = spatial(star), spatial(hub)
+            pwm = {j: max(550, min(2450, int(round(s[j] + (s[j] - h[j]) * 0.75)))) for j in SPATIAL_JOINT_IDS}
+            used, method = [star.key, hub.key], "extrap_star_dr"
+    else:
+        raise InterpolationError(
+            "OUTER_SEED_UNSUPPORTED",
+            f"P({r},{c}) is not a defined outer-ring seed point",
+        )
+
+    return InterpolationResult(
+        row=r,
+        col=c,
+        source="outer_ring_seed",
+        pwm=pwm,
+        time_ms=1000,
+        anchors_used=tuple(used),
+        u=None,
+        v=None,
+        details={"method": method, "priority": 0},
+    )
+
+
+
+def resolve_target_pwm(
+    store: CalibrationStore,
+    row: int,
+    col: int,
+    *,
+    limits: PwmSafetyLimits | None = None,
+    allow_star_seed: bool = True,
+    allow_outer_seed: bool = True,
+) -> InterpolationResult:
+    """Public resolver: taught > bilinear > star seed > outer-ring seed."""
+    try:
+        return interpolate_target_pwm(store, row, col, limits=limits)
+    except InterpolationError:
+        last: Exception | None = None
+        if allow_star_seed:
+            try:
+                return estimate_star_corner_pwm(store, row, col)
+            except InterpolationError as exc:
+                last = exc
+        if allow_outer_seed:
+            try:
+                return estimate_outer_ring_pwm(store, row, col)
+            except InterpolationError as exc:
+                last = exc
+        if last is not None:
+            raise last
+        raise
+
+
+def _enclosing_calibrated_cell(
+    calibrated: Mapping[str, AnchorPose],
+    row: int,
+    col: int,
+) -> tuple[int, int, int, int] | None:
+    """Tightest rectangle whose four corners are all calibrated."""
+    rows = sorted({a.row for a in calibrated.values()})
+    cols = sorted({a.col for a in calibrated.values()})
+    r_lo = [r for r in rows if r <= row]
+    r_hi = [r for r in rows if r >= row]
+    c_lo = [c for c in cols if c <= col]
+    c_hi = [c for c in cols if c >= col]
+    if not r_lo or not r_hi or not c_lo or not c_hi:
+        return None
+    # Closest bounds first → tightest cell that still has all four corners.
+    for r1 in reversed(r_lo):
+        for r2 in r_hi:
+            if r2 < r1:
+                continue
+            for c1 in reversed(c_lo):
+                for c2 in c_hi:
+                    if c2 < c1:
+                        continue
+                    keys = (f"{r1},{c1}", f"{r1},{c2}", f"{r2},{c1}", f"{r2},{c2}")
+                    if all(k in calibrated for k in keys):
+                        return r1, r2, c1, c2
+    return None
 
 
 def _enclosing_cell(
@@ -181,24 +442,14 @@ def _continuity_errors(
     corners: Mapping[str, AnchorPose],
     limits: PwmSafetyLimits,
 ) -> list[str]:
-    """Reject results that jump farther from corner anchors than adjacent-cell budget allows."""
     errors: list[str] = []
-    # Allow up to the diagonal of one calibration cell (row span + col span) in steps.
-    # We approximate with 2 * max_adjacent for a cell interior point.
     for jid in SPATIAL_JOINT_IDS:
-        budget = int(limits.max_adjacent_delta[jid]) * 2
-        for anchor in corners.values():
-            delta = abs(int(pwm[jid]) - int(anchor.spatial_pwm()[jid]))
-            # Scale budget by cell size in board cells.
-            # Conservative absolute cap still tied to derived adjacent threshold.
-            if delta > max(budget, limits.max_adjacent_delta[jid]):
-                # Only flag pathological jumps far outside the corner envelope.
-                lo = min(a.spatial_pwm()[jid] for a in corners.values())
-                hi = max(a.spatial_pwm()[jid] for a in corners.values())
-                if not (lo - limits.max_adjacent_delta[jid] <= pwm[jid] <= hi + limits.max_adjacent_delta[jid]):
-                    errors.append(
-                        f"joint {jid:03d} interpolated {pwm[jid]} outside corner envelope "
-                        f"{lo}..{hi} (adj_budget={limits.max_adjacent_delta[jid]})"
-                    )
-                    break
+        lo = min(a.spatial_pwm()[jid] for a in corners.values())
+        hi = max(a.spatial_pwm()[jid] for a in corners.values())
+        budget = int(limits.max_adjacent_delta[jid])
+        if not (lo - budget <= pwm[jid] <= hi + budget):
+            errors.append(
+                f"joint {jid:03d} interpolated {pwm[jid]} outside corner envelope "
+                f"{lo}..{hi} (adj_budget={budget})"
+            )
     return errors

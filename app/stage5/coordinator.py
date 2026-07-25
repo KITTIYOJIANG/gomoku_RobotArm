@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
@@ -16,7 +16,7 @@ from app.stage5.board_intersections import ClickSelection, build_intersection_gr
 from app.stage5.calibration_store import CalibrationStore
 from app.stage5.hover_planner import HoverPlan, HoverPlanner
 from app.stage5.logger import Stage5Logger
-from app.stage5.pwm_interpolator import InterpolationError, interpolate_target_pwm
+from app.stage5.pwm_interpolator import InterpolationError, interpolate_target_pwm, resolve_target_pwm
 from app.stage5.safety import derive_pwm_safety_limits
 from app.stage5.state_machine import Stage5State, Stage5StateMachine
 from app.stage5.constants import FORCE_STAGE5_DRY_RUN
@@ -249,9 +249,14 @@ class Stage5Coordinator:
         pixel_y: float | None,
     ) -> None:
         region = self.store.allowed_region
-        in_region = (
+        # Allow selecting points on the full board for expansion teaching
+        # (outer ring). "in_region" for hover means board-legal + resolvable pose.
+        in_calibrated_box = (
             region["row_min"] <= row <= region["row_max"]
             and region["col_min"] <= col <= region["col_max"]
+        )
+        in_region = in_calibrated_box or (
+            0 <= row < self.store.board_size and 0 <= col < self.store.board_size
         )
         calibrated = False
         source = "-"
@@ -259,25 +264,32 @@ class Stage5Coordinator:
         pwm: dict[str, int] | None = None
         verified = 0
         try:
-            result = interpolate_target_pwm(self.store, row, col, limits=self.limits)
-            calibrated = True
+            # Priority: taught > default bilinear > star seed.
+            result = resolve_target_pwm(self.store, row, col, limits=None, allow_star_seed=True)
             source = result.source
             pwm = result.pwm_str_keys()
             pwm_text = ", ".join(f"{k}:{v}" for k, v in pwm.items())
+            has_hover_pose = True
+            taught = source == "direct_anchor"
         except InterpolationError as exc:
             source = exc.code
             pwm_text = str(exc)
-            calibrated = False
+            has_hover_pose = False
+            taught = False
         anchor = self.store.get_anchor(row, col)
         if anchor is not None:
             verified = anchor.verified_runs
-            if not calibrated and anchor.calibrated:
-                calibrated = True
+            if anchor.calibrated:
+                taught = True
+        # State machine "calibrated" means "hoverable pose available", not "user taught".
+        # Otherwise star-seed / default-interp points stuck in TARGET_UNCALIBRATED and
+        # the hover button stays disabled.
+        hoverable = bool(has_hover_pose and in_region and pwm)
         self.stage_state.select_target(
             row,
             col,
             board_locked=self.board_locked,
-            calibrated=calibrated and in_region,
+            calibrated=hoverable,
             in_region=in_region,
         )
         self.target = TargetView(
@@ -285,13 +297,13 @@ class Stage5Coordinator:
             col=col,
             pixel_x=pixel_x,
             pixel_y=pixel_y,
-            calibrated_text="YES" if calibrated else "NO",
-            region_text="YES" if in_region else "NO",
+            calibrated_text="YES" if taught else "NO",
+            region_text=("YES" if in_calibrated_box else ("EXPAND" if in_region else "NO")),
             source=source,
             pwm_text=pwm_text,
             verified_runs=verified,
             in_region=in_region,
-            calibrated=calibrated,
+            calibrated=taught,
             pwm=pwm,
         )
         self.logger.log(
@@ -306,7 +318,12 @@ class Stage5Coordinator:
             pwm=pwm,
         )
 
-    def plan_hover(self, *, holding_piece: bool) -> HoverPlan:
+    def plan_hover(
+        self,
+        *,
+        holding_piece: bool,
+        pwm_override: dict[str, int] | None = None,
+    ) -> HoverPlan:
         if self.target.row is None or self.target.col is None:
             raise RuntimeError("No target selected")
         if not self.store.valid:
@@ -319,12 +336,22 @@ class Stage5Coordinator:
         if arm.state not in {ArmState.OBSERVE_IDLE, ArmState.OBSERVE_HOLD}:
             raise RuntimeError(f"Arm state {arm.state.value} cannot start hover")
         dry_run = True if FORCE_STAGE5_DRY_RUN else (self.stage_state.snapshot().dry_run or self.controller.dry_run)
-        plan = self.planner.plan_hover_to(
-            self.target.row,
-            self.target.col,
-            holding_piece=holding_piece,
-            dry_run=dry_run,
-        )
+        if pwm_override is not None:
+            plan = self.planner.plan_hover_with_pwm(
+                self.target.row,
+                self.target.col,
+                pwm_override,
+                holding_piece=holding_piece,
+                dry_run=dry_run,
+                source="user_edited",
+            )
+        else:
+            plan = self.planner.plan_hover_to(
+                self.target.row,
+                self.target.col,
+                holding_piece=holding_piece,
+                dry_run=dry_run,
+            )
         self.last_plan = plan
         self.logger.log("HOVER_PLAN", **plan.to_dict())
         return plan
@@ -375,7 +402,19 @@ class Stage5Coordinator:
             raise RuntimeError("Safe return only from HOVERING")
         holding = self._holding_piece
         dry_run = True if FORCE_STAGE5_DRY_RUN else (self.stage_state.snapshot().dry_run or self.controller.dry_run)
-        sequence = self.planner.plan_return_to_observe(holding_piece=holding, dry_run=dry_run)
+        ref_001 = None
+        if self.target.pwm and "001" in self.target.pwm:
+            ref_001 = int(self.target.pwm["001"])
+        elif self.last_plan is not None:
+            try:
+                ref_001 = int(self.last_plan.interpolation.pwm.get(1, 0)) or None
+            except Exception:
+                ref_001 = None
+        sequence = self.planner.plan_return_to_observe(
+            holding_piece=holding,
+            dry_run=dry_run,
+            reference_001=ref_001,
+        )
         self.stage_state.begin_return()
         self.arm_state.begin_return_from_hover()
         self._active_sequence = sequence.name

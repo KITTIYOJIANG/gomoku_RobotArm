@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
@@ -124,6 +124,18 @@ class CalibrationStore:
     def is_anchor_point(self, row: int, col: int) -> bool:
         return int(row) in self.anchor_rows and int(col) in self.anchor_cols
 
+    def expand_anchor_grid(self, row: int, col: int) -> None:
+        """Include a taught intersection in the interpolation grid (rows/cols)."""
+        r = int(row)
+        c = int(col)
+        if not (0 <= r < self.board_size and 0 <= c < self.board_size):
+            raise ValueError(f"({r},{c}) outside board")
+        rows = sorted(set(self.anchor_rows) | {r})
+        cols = sorted(set(self.anchor_cols) | {c})
+        self._data["anchor_rows"] = rows
+        self._data["anchor_cols"] = cols
+
+
     def calibrated_anchors(self) -> dict[str, AnchorPose]:
         return {key: anchor for key, anchor in self._anchors.items() if anchor.calibrated}
 
@@ -239,14 +251,28 @@ class CalibrationStore:
         calibrated: bool | None = None,
         verified_runs: int | None = None,
         require_anchor_set: bool = True,
+        expand_grid: bool = False,
+        safety_limits: object | None = None,
+        skip_envelope_check: bool = False,
     ) -> AnchorPose:
+        if expand_grid:
+            self.expand_anchor_grid(row, col)
         if require_anchor_set and not self.is_anchor_point(row, col):
             raise ValueError(f"({row},{col}) is not in the configured anchor set")
         normalized = {f"{int(k):03d}": int(v) for k, v in pwm.items() if int(k) in SPATIAL_JOINT_IDS}
-        if self.safety_limits is not None:
-            errors = validate_spatial_pwm(normalized, self.safety_limits)
+        limits = safety_limits if safety_limits is not None else self.safety_limits
+        if not skip_envelope_check and limits is not None:
+            errors = validate_spatial_pwm(normalized, limits)
             if errors:
                 raise ValueError("; ".join(errors))
+        # Absolute protocol bounds always
+        for jid in SPATIAL_JOINT_IDS:
+            key = f"{jid:03d}"
+            if key not in normalized:
+                continue
+            v = int(normalized[key])
+            if not (500 <= v <= 2500):
+                raise ValueError(f"joint {key} PWM {v} outside protocol 500..2500")
         for jid in SPATIAL_JOINT_IDS:
             key = f"{jid:03d}"
             if key not in normalized:

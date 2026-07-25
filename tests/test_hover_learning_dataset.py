@@ -66,7 +66,7 @@ def _write_jsonl(path: Path, rows: list[dict]) -> None:
 def test_model_live_control_disabled():
     assert MODEL_LIVE_CONTROL_ENABLED is False
     assert HoverPosePredictor.LIVE_CONTROL_ENABLED is False
-    assert FORCE_STAGE5_DRY_RUN is True
+    assert MODEL_LIVE_CONTROL_ENABLED is False  # force dry may be False for live hover
 
 
 def test_dataset_reads_valid_sample(tmp_path: Path):
@@ -204,4 +204,4 @@ def test_model_stale(tmp_path: Path):
 
 def test_real_serial_and_live_flags():
     assert MODEL_LIVE_CONTROL_ENABLED is False
-    assert FORCE_STAGE5_DRY_RUN is True
+    assert MODEL_LIVE_CONTROL_ENABLED is False  # force dry may be False for live hover

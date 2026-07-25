@@ -209,6 +209,14 @@ class ArmStateMachine:
     def complete_return_from_hover(self, *, holding_piece: bool) -> tuple[ArmState, ArmState]:
         final = ArmState.OBSERVE_HOLD if holding_piece else ArmState.OBSERVE_IDLE
         return self._complete("SAFE_RETURN_FROM_HOVER", ArmState.RETURNING_FROM_HOVER, final)
+    def mark_observe_idle(self) -> tuple[ArmState, ArmState]:
+        """Software mark after a sequence that already commanded OBSERVE_IDLE."""
+        with self._lock:
+            self._busy = False
+            self._current_action = None
+            self._error = None
+            return self._set_state(ArmState.OBSERVE_IDLE)
+
     def estop(self) -> tuple[ArmState, ArmState]:
         with self._lock:
             self._busy = False

@@ -204,6 +204,15 @@ class Stage5StateMachine:
             self._target_in_region = bool(in_region)
             self._error = None
             previous = self._state
+            # While physically hovering, keep HOVERING so "安全返回" stays available.
+            # Only update target metadata; user must return before the next hover.
+            if self._state == Stage5State.HOVERING:
+                LOGGER.info(
+                    "[STAGE5][TARGET_WHILE_HOVERING] P(%s,%s) kept HOVERING; return first",
+                    row,
+                    col,
+                )
+                return self._state
             self._apply_target_state_locked()
             if self._state != previous:
                 LOGGER.info("[STAGE5][STATE] %s -> %s", previous.value, self._state.value)
@@ -272,7 +281,21 @@ class Stage5StateMachine:
             self._holding_piece = False
             self._board_locked = bool(board_locked)
             self._arm_ready = True
-            self._recompute_from_context_locked()
+            # Must leave MOVING_* before recompute, otherwise state stays stuck returning.
+            if self._target_row is not None:
+                self._state = (
+                    Stage5State.DRY_RUN_READY if self._dry_run else Stage5State.TARGET_READY
+                )
+                if not self._target_in_region or not self._target_calibrated:
+                    self._state = Stage5State.TARGET_UNCALIBRATED
+            elif self._arm_ready and self._serial_connected and self._board_locked:
+                self._state = Stage5State.READY
+            elif self._serial_connected and not self._board_locked:
+                self._state = Stage5State.BOARD_NOT_LOCKED
+            elif not self._serial_connected:
+                self._state = Stage5State.DISCONNECTED
+            else:
+                self._state = Stage5State.IDLE
             LOGGER.info("[STAGE5][STATE] %s -> %s", previous.value, self._state.value)
             return self._state
 

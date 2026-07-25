@@ -63,6 +63,7 @@ class ControlPanel(QWidget):
     manual_action_requested = Signal(str)
     estop_requested = Signal()
     pump_off_requested = Signal()
+    beep_test_requested = Signal()
     corner_overlay_options_changed = Signal(bool, bool)
     piece_recognition_requested = Signal()
 
@@ -89,8 +90,22 @@ class ControlPanel(QWidget):
         content_layout.addWidget(self._build_vision_debug_group())
         content_layout.addWidget(self._build_core_group())
         content_layout.addWidget(self.stage5_panel)
-        content_layout.addWidget(self.cross_anchor_panel)
-        content_layout.addWidget(self.hover_learning_panel)
+        self._adv_cross = QGroupBox('高级：中心十字标定（默认收起）')
+        self._adv_cross.setCheckable(True)
+        self._adv_cross.setChecked(False)
+        lay1 = QVBoxLayout(self._adv_cross)
+        lay1.addWidget(self.cross_anchor_panel)
+        self.cross_anchor_panel.setVisible(False)
+        self._adv_cross.toggled.connect(self.cross_anchor_panel.setVisible)
+        content_layout.addWidget(self._adv_cross)
+        self._adv_learn = QGroupBox('高级：学习层影子预测（默认收起）')
+        self._adv_learn.setCheckable(True)
+        self._adv_learn.setChecked(False)
+        lay2 = QVBoxLayout(self._adv_learn)
+        lay2.addWidget(self.hover_learning_panel)
+        self.hover_learning_panel.setVisible(False)
+        self._adv_learn.toggled.connect(self.hover_learning_panel.setVisible)
+        content_layout.addWidget(self._adv_learn)
         content_layout.addWidget(self._build_manual_group())
         content_layout.addWidget(self._build_future_group())
         content_layout.addWidget(self._build_safety_group())
@@ -205,12 +220,18 @@ class ControlPanel(QWidget):
         return group
 
     def _build_future_group(self) -> QGroupBox:
-        group = QGroupBox("后续扩展")
+        group = QGroupBox("扩展 / 诊断")
         layout = QGridLayout(group)
+        self.beep_test_button = QPushButton("蜂鸣器测试")
+        self.beep_test_button.clicked.connect(lambda _c=False: self.beep_test_requested.emit())
+        layout.addWidget(self.beep_test_button, 0, 0, 1, 2)
+        row = 1
         for index, name in enumerate(FUTURE_ACTIONS):
+            if name == "蜂鸣器测试":
+                continue
             button = QPushButton(f"{name}（后续版本）")
             button.setEnabled(False)
-            layout.addWidget(button, index // 2, index % 2)
+            layout.addWidget(button, row + index // 2, index % 2)
         return group
 
     def _build_safety_group(self) -> QGroupBox:
@@ -268,7 +289,8 @@ class ControlPanel(QWidget):
         self.connect_serial_button.setEnabled(not connected and not busy)
         self.disconnect_serial_button.setEnabled(connected)
         ordinary = connected and not busy
-        self.return_button.setEnabled(ordinary)
+        # 回观察位：串口一连上就应可点（忙时点击会提示），不必等 OBSERVE/悬停状态。
+        self.return_button.setEnabled(connected)
         self.pick_button.setEnabled(ordinary and state == ArmState.OBSERVE_IDLE)
         self.place_button.setEnabled(
             ordinary
@@ -287,3 +309,5 @@ class ControlPanel(QWidget):
             button.setEnabled(ordinary)
         self.estop_button.setEnabled(connected)
         self.pump_off_button.setEnabled(connected)
+        if hasattr(self, "beep_test_button"):
+            self.beep_test_button.setEnabled(connected)

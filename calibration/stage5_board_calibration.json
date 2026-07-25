@@ -14,14 +14,29 @@
   ],
   "pump_joint_id": "005",
   "anchor_rows": [
+    0,
     3,
+    4,
+    5,
+    6,
     7,
-    11
+    8,
+    9,
+    10,
+    11,
+    14
   ],
   "anchor_cols": [
+    0,
     3,
+    4,
+    5,
+    6,
     7,
-    11
+    8,
+    9,
+    11,
+    14
   ],
   "anchors": {
     "7,7": {
@@ -39,12 +54,476 @@
       "calibrated": true,
       "verified_runs": 1,
       "notes": "Imported from stable action library P77_ABOVE_IDLE"
+    },
+    "3,7": {
+      "row": 3,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1553,
+        "001": 1140,
+        "002": 1180,
+        "003": 1125,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 12,
+      "notes": "user fine-tune taught point"
+    },
+    "7,3": {
+      "row": 7,
+      "col": 3,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1650,
+        "001": 1200,
+        "002": 1000,
+        "003": 1190,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 10,
+      "notes": "cross-anchor wizard manual calibration"
+    },
+    "7,11": {
+      "row": 7,
+      "col": 11,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1470,
+        "001": 1200,
+        "002": 990,
+        "003": 1190,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 3,
+      "notes": "cross-anchor wizard manual calibration"
+    },
+    "11,7": {
+      "row": 11,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1590,
+        "001": 1230,
+        "002": 720,
+        "003": 1370,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 3,
+      "notes": "promoted from completed draft for tour"
+    },
+    "7,5": {
+      "row": 7,
+      "col": 5,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1615,
+        "001": 1185,
+        "002": 995,
+        "003": 1180,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "7,4": {
+      "row": 7,
+      "col": 4,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1632,
+        "001": 1192,
+        "002": 998,
+        "003": 1185,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "7,6": {
+      "row": 7,
+      "col": 6,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1593,
+        "001": 1178,
+        "002": 992,
+        "003": 1175,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "7,8": {
+      "row": 7,
+      "col": 8,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1534,
+        "001": 1178,
+        "002": 990,
+        "003": 1175,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "4,7": {
+      "row": 4,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1555,
+        "001": 1140,
+        "002": 1132,
+        "003": 1136,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "6,7": {
+      "row": 6,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1558,
+        "001": 1180,
+        "002": 1037,
+        "003": 1159,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "8,7": {
+      "row": 8,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1568,
+        "001": 1260,
+        "002": 880,
+        "003": 1250,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "3,3": {
+      "row": 3,
+      "col": 3,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1628,
+        "001": 1170,
+        "002": 1190,
+        "003": 1145,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "3,11": {
+      "row": 3,
+      "col": 11,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1483,
+        "001": 1170,
+        "002": 1180,
+        "003": 1145,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "11,3": {
+      "row": 11,
+      "col": 3,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1680,
+        "001": 1260,
+        "002": 740,
+        "003": 1390,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "11,11": {
+      "row": 11,
+      "col": 11,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1465,
+        "001": 1260,
+        "002": 720,
+        "003": 1390,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "8,11": {
+      "row": 8,
+      "col": 11,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1469,
+        "001": 1215,
+        "002": 922,
+        "003": 1240,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "10,11": {
+      "row": 10,
+      "col": 11,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1466,
+        "001": 1245,
+        "002": 787,
+        "003": 1340,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "5,5": {
+      "row": 5,
+      "col": 5,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1598,
+        "001": 1170,
+        "002": 1090,
+        "003": 1158,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "9,5": {
+      "row": 9,
+      "col": 5,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1620,
+        "001": 1215,
+        "002": 862,
+        "003": 1280,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "14,7": {
+      "row": 14,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1592,
+        "001": 1275,
+        "002": 550,
+        "003": 1415,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "0,7": {
+      "row": 0,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1548,
+        "001": 1118,
+        "002": 1322,
+        "003": 1091,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "7,0": {
+      "row": 7,
+      "col": 0,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1700,
+        "001": 1222,
+        "002": 1040,
+        "003": 1205,
+        "004": 1300
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "7,14": {
+      "row": 7,
+      "col": 14,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1430,
+        "001": 1222,
+        "002": 1000,
+        "003": 1205,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "0,0": {
+      "row": 0,
+      "col": 0,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1658,
+        "001": 1155,
+        "002": 1388,
+        "003": 1140,
+        "004": 1300
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "0,14": {
+      "row": 0,
+      "col": 14,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1450,
+        "001": 1150,
+        "002": 1350,
+        "003": 1140,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "14,0": {
+      "row": 14,
+      "col": 0,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1770,
+        "001": 1300,
+        "002": 635,
+        "003": 1470,
+        "004": 1300
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "14,14": {
+      "row": 14,
+      "col": 14,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1370,
+        "001": 1300,
+        "002": 560,
+        "003": 1450,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "0,5": {
+      "row": 0,
+      "col": 5,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1585,
+        "001": 1120,
+        "002": 1341,
+        "003": 1105,
+        "004": 1443
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
+    },
+    "0,9": {
+      "row": 0,
+      "col": 9,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1520,
+        "001": 1127,
+        "002": 1330,
+        "003": 1120,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "user fine-tune taught point"
     }
   },
   "limits": {},
   "metadata": {
     "created_at": "2026-07-22T15:27:10",
-    "updated_at": "2026-07-22T15:27:10",
+    "updated_at": "2026-07-25T15:52:09",
     "camera_setup": "",
     "board_setup": ""
   }

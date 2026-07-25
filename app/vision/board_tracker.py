@@ -37,7 +37,12 @@ class BoardTrackSnapshot:
 
     @property
     def placement_ready(self) -> bool:
-        return self.state == BoardTrackState.LOCKED and self.displayable
+        # FROZEN = hold last board pose while the arm occludes AprilTags (esp. top-left).
+        # Stage5 must keep board_locked=True during hover/return self-occlusion.
+        return (
+            self.state in (BoardTrackState.LOCKED, BoardTrackState.FROZEN)
+            and self.displayable
+        )
 
     @property
     def display_status(self) -> str:
@@ -61,7 +66,7 @@ class BoardTracker:
         *,
         smoothing_alpha: float = 0.35,
         failure_limit: int = 5,
-        lost_timeout_seconds: float = 2.0,
+        lost_timeout_seconds: float = 4.0,
     ) -> None:
         self.smoothing_alpha = float(smoothing_alpha)
         self.failure_limit = int(failure_limit)
@@ -77,6 +82,7 @@ class BoardTracker:
         self._homography: np.ndarray | None = None
         self._failure_count = 0
         self._last_success_timestamp: float | None = None
+        self._arm_busy = False
 
     def reset(self) -> BoardTrackSnapshot:
         self._state = BoardTrackState.LOST
@@ -92,8 +98,21 @@ class BoardTracker:
         return self.snapshot()
 
     def set_arm_busy(self, busy: bool) -> BoardTrackSnapshot:
-        if busy and self._corners is not None:
+        busy = bool(busy)
+        if busy == self._arm_busy:
+            return self.snapshot()
+        self._arm_busy = busy
+        if self._corners is None:
+            return self.snapshot()
+        if busy:
+            # Freeze immediately so tag loss from self-occlusion does not LOST the board.
             self._state = BoardTrackState.FROZEN
+            self._failure_count = 0
+        else:
+            # After motion, keep frozen pose and reset grace window until tags recover.
+            self._state = BoardTrackState.FROZEN
+            self._failure_count = 0
+            self._last_success_timestamp = time.monotonic()
         return self.snapshot()
 
     def update(
@@ -105,7 +124,9 @@ class BoardTracker:
         timestamp: float | None = None,
     ) -> BoardTrackSnapshot:
         observed_at = time.monotonic() if timestamp is None else float(timestamp)
-        if arm_busy:
+        if bool(arm_busy) != self._arm_busy:
+            self.set_arm_busy(arm_busy)
+        if self._arm_busy:
             if self._corners is not None:
                 self._state = BoardTrackState.FROZEN
             return self.snapshot()

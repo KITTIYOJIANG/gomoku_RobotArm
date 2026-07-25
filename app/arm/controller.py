@@ -106,6 +106,25 @@ class SerialArmController:
     def pump_off(self) -> None:
         self.write(PUMP_OFF_COMMAND, label="PUMP_OFF")
 
+    def beep(self, times: int = 1, duration_ms: int = 100) -> list[str]:
+        """Best-effort arm buzzer via multiple protocol candidates.
+
+        V0.1 PWM firmware may ignore unknown commands; we try several known forms.
+        Returns the raw command strings that were written.
+        """
+        count = max(1, min(5, int(times)))
+        duration = max(20, min(1000, int(duration_ms)))
+        candidates = [
+            f"$BEEP:{count},{duration}!",
+            f"beep,{count}" + "\r\n",
+            f"beep,{count}" + "\n",
+        ]
+        sent: list[str] = []
+        for cmd in candidates:
+            self.write(cmd, label="BEEP")
+            sent.append(cmd)
+        return sent
+
     def write(self, command: str, *, label: str = "RAW") -> None:
         if not command or not command.isascii():
             raise ValueError("Serial command must be non-empty ASCII")

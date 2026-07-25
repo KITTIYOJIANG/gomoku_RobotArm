@@ -8,6 +8,7 @@ import logging
 from typing import Any, Callable
 
 from app.arm.actions import ActionLibrary
+from app.arm.sequences import ActionStep, SequenceDefinition
 from app.stage5.calibration_store import CalibrationStore
 from app.stage5.candidate_store import CandidateStore, CandidateStoreError
 from app.stage5.constants import (
@@ -21,7 +22,12 @@ from app.stage5.constants import (
     move_confirm_token,
 )
 from app.stage5.hover_planner import build_action_from_pwm
-from app.stage5.safety import SPATIAL_JOINT_IDS, derive_pwm_safety_limits, validate_spatial_pwm
+from app.stage5.safety import (
+    SPATIAL_JOINT_IDS,
+    derive_calibration_limits,
+    derive_pwm_safety_limits,
+    validate_spatial_pwm,
+)
 from app.learning.hover_sample_store import HoverSampleStore
 
 
@@ -85,7 +91,8 @@ class CrossAnchorWizard:
         self.state = CalibrationWizardState.IDLE
         self.index = 0
         self.reference_pwm = self._load_p77_pwm()
-        self.limits = derive_pwm_safety_limits(self.library)
+        self.limits = derive_calibration_limits(self.library)
+        self.tight_limits = derive_pwm_safety_limits(self.library)
         self.candidate_pwm: dict[str, int] = dict(self.reference_pwm)
         self.undo_stack: list[dict[str, int]] = []
         self.last_validation: list[ValidationIssue] = []
@@ -152,8 +159,27 @@ class CrossAnchorWizard:
         if all(pwm.get(j) is not None for j in SPATIAL_JOINTS):
             self.candidate_pwm = {j: int(pwm[j]) for j in SPATIAL_JOINTS}
         else:
+            # New/empty anchor: start from P77 so inputs are never blank.
             self.candidate_pwm = dict(self.reference_pwm)
+            try:
+                self.drafts.set_candidate_pwm(
+                    self.current_row,
+                    self.current_col,
+                    self.candidate_pwm,
+                    status="DRAFT",
+                    notes="auto-seed from P77",
+                )
+            except Exception:
+                pass
         self.undo_stack.clear()
+
+    def apply_candidate_pwm(self, pwm: dict[str, int], *, note: str = "panel_edit") -> None:
+        """Replace candidate PWM from GUI edits (single undo step)."""
+        normalized = {j: int(pwm[j]) for j in SPATIAL_JOINTS}
+        self.undo_stack.append(dict(self.candidate_pwm))
+        self.candidate_pwm = normalized
+        self.state = CalibrationWizardState.ANCHOR_DRAFT
+        LOGGER.info("[STAGE5][CANDIDATE_APPLY] note=%s pwm=%s", note, normalized)
 
     def set_joint(self, joint_id: str, value: int) -> None:
         jid = f"{int(joint_id):03d}"
@@ -194,24 +220,42 @@ class CrossAnchorWizard:
         if any(i.code == "NULL_PWM" for i in issues):
             self.last_validation = issues
             return issues
-        # envelope from stable actions
-        errors = validate_spatial_pwm({int(j): int(self.candidate_pwm[j]) for j in SPATIAL_JOINTS}, self.limits)
+        # Hard block only at absolute protocol bounds (500..2500 typically).
+        for jid in SPATIAL_JOINTS:
+            v = int(self.candidate_pwm[jid])
+            if not (self.limits.pwm_min <= v <= self.limits.pwm_max):
+                issues.append(
+                    ValidationIssue(
+                        "BLOCKING_ERROR",
+                        "PROTOCOL",
+                        f"joint {jid} PWM {v} outside protocol {self.limits.pwm_min}..{self.limits.pwm_max}",
+                    )
+                )
+        # Wide calibration envelope: still block extreme outliers.
+        errors = validate_spatial_pwm(
+            {int(j): int(self.candidate_pwm[j]) for j in SPATIAL_JOINTS}, self.limits
+        )
         for err in errors:
             issues.append(ValidationIssue("BLOCKING_ERROR", "ENVELOPE", err))
-        # delta vs P77
+        # Tight factory-pose cloud: warning only (real board points often go outside).
+        tight = validate_spatial_pwm(
+            {int(j): int(self.candidate_pwm[j]) for j in SPATIAL_JOINTS}, self.tight_limits
+        )
+        for err in tight:
+            issues.append(ValidationIssue("WARNING", "TIGHT_ENVELOPE", err + " (allowed for teaching)"))
+        # delta vs P77 — warn, rarely block (only huge jumps)
         for jid, delta in self.deltas().items():
-            adj = self.limits.max_adjacent_delta[int(jid)]
-            # allow larger than one cell because anchors are 4 cells away, use *4 margin
-            budget = max(40, adj * 5)
-            if abs(delta) > budget:
+            budget_warn = 250
+            budget_block = 450
+            if abs(delta) > budget_block:
                 issues.append(
                     ValidationIssue(
                         "BLOCKING_ERROR",
                         "DELTA_TOO_LARGE",
-                        f"joint {jid} delta {delta} exceeds conservative budget ±{budget}",
+                        f"joint {jid} delta {delta} exceeds hard budget ±{budget_block}",
                     )
                 )
-            elif abs(delta) > budget * 0.7:
+            elif abs(delta) > budget_warn:
                 issues.append(
                     ValidationIssue("WARNING", "DELTA_LARGE", f"joint {jid} delta {delta} is large")
                 )
@@ -317,28 +361,75 @@ class CrossAnchorWizard:
             if "#005P2500" in command:
                 raise RuntimeError("plan must keep pump OFF")
 
+
+    def should_dry_run(self, *, gui_dry_run_checked: bool) -> bool:
+        """Dry-run if global force, wizard force, or GUI checkbox is on."""
+        from app.stage5.constants import FORCE_STAGE5_DRY_RUN
+        return bool(FORCE_STAGE5_DRY_RUN or self.force_dry_run or gui_dry_run_checked)
+
+    def build_sequence(self, plan: StepPlan) -> SequenceDefinition:
+        # Ensure candidate runtime action is registered for TARGET plans.
+        if plan.name == "CROSS_TARGET_ABOVE":
+            self._register_candidate_action()
+        steps = tuple(ActionStep(name) for name in plan.action_names)
+        return SequenceDefinition(
+            name=plan.name,
+            display_name=plan.display_name,
+            requires_board=True,
+            steps=steps,
+        )
+
     def execute_plan_mock(self, plan: StepPlan, *, gui_dry_run_checked: bool = True) -> list[tuple[str, str]]:
-        """Always mock when FORCE_STAGE5_DRY_RUN is True. Never increments real write count."""
+        """Backward-compatible dry/mock execute (no serial). """
+        mode, payload = self.execute_plan(plan, gui_dry_run_checked=gui_dry_run_checked)
+        if mode != "dry_run":
+            raise RuntimeError("execute_plan_mock called but live mode selected; use live path")
+        return list(payload)
+
+    def execute_plan(
+        self,
+        plan: StepPlan,
+        *,
+        gui_dry_run_checked: bool = True,
+    ) -> tuple[str, list[tuple[str, str]] | SequenceDefinition]:
+        """Return ("dry_run", commands) or ("live", SequenceDefinition)."""
         if self._estop:
             raise RuntimeError("estop latched")
-        effective_dry = True if self.force_dry_run else bool(gui_dry_run_checked)
-        if not effective_dry:
-            # Live path is intentionally blocked this sprint.
-            raise RuntimeError("FORCE_STAGE5_DRY_RUN blocks live serial writes")
-        sent: list[tuple[str, str]] = []
-        for label, command in plan.serial_commands:
-            self.mock_tx.append((label, command))
-            sent.append((label, command))
-            LOGGER.info("[STAGE5][MOCK_TX] %s %s", label, command)
-        # real_serial_write_count stays 0
+        dry = self.should_dry_run(gui_dry_run_checked=gui_dry_run_checked)
+        if dry:
+            sent: list[tuple[str, str]] = []
+            for label, command in plan.serial_commands:
+                self.mock_tx.append((label, command))
+                sent.append((label, command))
+                LOGGER.info("[STAGE5][MOCK_TX] %s %s", label, command)
+            self._advance_state_after_plan(plan, live=False)
+            return "dry_run", sent
+        sequence = self.build_sequence(plan)
+        self._active_live_plan = plan.name
+        self._advance_state_after_plan(plan, live=True)
+        LOGGER.info("[STAGE5][LIVE_PLAN] %s actions=%s", plan.name, plan.action_names)
+        return "live", sequence
+
+    def _advance_state_after_plan(self, plan: StepPlan, *, live: bool) -> None:
         if plan.name == "CROSS_CARRY_HIGH":
             self.state = CalibrationWizardState.AT_CARRY_HIGH
         elif plan.name == "CROSS_TARGET_ABOVE":
             self.state = CalibrationWizardState.AWAITING_USER_VERIFICATION
         elif plan.name == "CROSS_SAFE_RETURN":
             self.state = CalibrationWizardState.RETURNING_FROM_ANCHOR
+            if not live:
+                self._safe_return_done = True
+
+    def mark_live_plan_finished(self, name: str, *, success: bool) -> None:
+        if success and name == "CROSS_SAFE_RETURN":
             self._safe_return_done = True
-        return sent
+            self.state = CalibrationWizardState.AWAITING_USER_VERIFICATION
+        elif success and name == "CROSS_TARGET_ABOVE":
+            self.state = CalibrationWizardState.AWAITING_USER_VERIFICATION
+        elif success and name == "CROSS_CARRY_HIGH":
+            self.state = CalibrationWizardState.AT_CARRY_HIGH
+        self.real_serial_write_count += 0  # count is maintained by transport/main
+        self._active_live_plan = None
 
     def live_confirm_token(self) -> str:
         return move_confirm_token(self.current_row, self.current_col)
@@ -414,19 +505,51 @@ class CrossAnchorWizard:
 
     def mark_safe_return_completed(self) -> None:
         self._safe_return_done = True
+        # Persist on draft so "confirm complete" can see it after LIVE return.
+        try:
+            entry = self.drafts.get(self.current_row, self.current_col)
+            entry["safe_return_completed"] = True
+            entry["emergency_stop"] = False
+            # write back via record without incrementing runs
+            self.drafts.record_test_result(
+                self.current_row,
+                self.current_col,
+                result=str(entry.get("last_test_result") or "RETURN_OK"),
+                safe_return_completed=True,
+                emergency_stop=False,
+                increment_verified=False,
+            )
+            LOGGER.info(
+                "[STAGE5][SAFE_RETURN_FLAG] P(%s,%s) safe_return_completed=1",
+                self.current_row,
+                self.current_col,
+            )
+        except Exception as exc:
+            LOGGER.warning("persist safe_return_completed failed: %s", exc)
 
     def reset_test_session_flags(self) -> None:
         self._safe_return_done = False
         self._estop = False
 
     def complete_anchor(self, *, write_calibration: bool = True) -> dict[str, Any]:
+        # Ensure latest panel PWM is in draft
+        try:
+            self.save_draft(notes="auto-save before complete")
+        except Exception:
+            pass
         entry = self.drafts.get(self.current_row, self.current_col)
         runs = int(entry.get("verified_runs", 0))
+        safe_ret = bool(entry.get("safe_return_completed")) or bool(self._safe_return_done)
         if runs < self.required_runs:
-            raise RuntimeError(f"verified_runs {runs} < required {self.required_runs}")
-        if not entry.get("safe_return_completed"):
-            # last successful cycle must have returned
-            raise RuntimeError("safe return not completed")
+            raise RuntimeError(
+                f"成功验证次数不足: verified_runs={runs} < 需要{self.required_runs}。"
+                f"请在真机悬停并安全返回后，点「结果:位置正确安全」。"
+            )
+        if not safe_ret:
+            raise RuntimeError(
+                "尚未标记安全返回完成。请先执行「安全返回」计划并成功，"
+                "再点「结果:位置正确安全」，最后点「确认锚点完成」。"
+            )
         if entry.get("emergency_stop"):
             raise RuntimeError("cannot complete after estop without clean verification")
         raw_pwm = entry.get("candidate_pwm") or {}
@@ -439,14 +562,17 @@ class CrossAnchorWizard:
             else:
                 raise RuntimeError("candidate_pwm incomplete; save draft first")
         pwm = {j: int(raw_pwm[j]) for j in SPATIAL_JOINTS}
-        # re-validate
+        # re-validate with wide teaching limits
         self.candidate_pwm = dict(pwm)
         if self.has_blocking_errors():
-            raise RuntimeError("candidate no longer passes validation")
+            raise RuntimeError(
+                "candidate fails validation: "
+                + "; ".join(i.message for i in self.last_validation if i.level == "BLOCKING_ERROR")
+            )
 
-        completed = self.drafts.mark_completed(self.current_row, self.current_col)
+        # Write formal calibration FIRST so a later failure cannot leave
+        # draft status=COMPLETED while board calibration is missing (seen on P11,7).
         if write_calibration:
-            # Never overwrite P77
             if (self.current_row, self.current_col) == PROTECTED_ANCHOR:
                 raise RuntimeError("refusing to overwrite protected P77")
             self.calibration.upsert_anchor(
@@ -458,6 +584,8 @@ class CrossAnchorWizard:
                 calibrated=True,
                 verified_runs=runs,
                 require_anchor_set=True,
+                safety_limits=self.limits,  # wide teaching envelope
+                skip_envelope_check=False,
             )
             self.calibration.save()
 
@@ -471,6 +599,7 @@ class CrossAnchorWizard:
             emergency_stop=False,
             calibration_version=version,
         )
+        completed = self.drafts.mark_completed(self.current_row, self.current_col)
         self.state = CalibrationWizardState.ANCHOR_COMPLETED
         LOGGER.info(
             "[STAGE5][ANCHOR_COMPLETED] target=P%s%s calibrated=1 sample=%s",

@@ -29,8 +29,14 @@ from app.learning.hover_predictor import HoverPosePredictor
 from app.learning.hover_comparator import HoverPoseComparator
 from app.learning.hover_trainer import TrainConfig, train_hover_pose
 from app.learning import MODEL_LIVE_CONTROL_ENABLED
-from app.stage5.safety import derive_pwm_safety_limits
-from app.stage5.constants import FORCE_STAGE5_DRY_RUN
+from app.stage5.safety import derive_calibration_limits, derive_pwm_safety_limits
+from app.stage5.constants import FORCE_STAGE5_DRY_RUN, OUTER_RING, STAR_CORNERS
+from app.stage5.pwm_interpolator import estimate_outer_ring_pwm, estimate_star_corner_pwm
+from app.stage5.tour_planner import (
+    build_board_reachable_tour,
+    build_cross_reverify_tour,
+    sync_completed_drafts_into_calibration,
+)
 from app.stage5.state_machine import Stage5Invalid, Stage5State
 from app.gui.camera_panel import CameraPanel
 from app.gui.control_panel import ControlPanel
@@ -102,9 +108,13 @@ class MainWindow(QMainWindow):
             drafts=CandidateStore(draft_path),
             samples=HoverSampleStore(sample_path),
             required_runs=int(getattr(config.stage5, "cross_anchor_required_runs", 3)),
-            force_dry_run=bool(getattr(config.stage5, "force_dry_run", FORCE_STAGE5_DRY_RUN)),
+            force_dry_run=bool(getattr(config.stage5, "force_dry_run", False) or FORCE_STAGE5_DRY_RUN),
         )
         self._cross_last_plan = None
+        self._active_tour = None
+        self._star_index = 0
+        self._outer_index = 0
+        self._active_tour_dry = False
         self._samples_path = Path(sample_path)
         self._model_dir = self.config.logs_dir.parent / "models" / "hover_pose"
         self.hover_predictor = HoverPosePredictor(
@@ -162,6 +172,7 @@ class MainWindow(QMainWindow):
         panel.manual_action_requested.connect(self.start_manual)
         panel.estop_requested.connect(self.emergency_stop)
         panel.pump_off_requested.connect(self.pump_off)
+        panel.beep_test_requested.connect(self.test_beep)
         panel.corner_overlay_options_changed.connect(self.set_corner_overlay_options)
         panel.piece_recognition_requested.connect(self.request_piece_recognition)
 
@@ -182,6 +193,15 @@ class MainWindow(QMainWindow):
         s5.restore_backup_requested.connect(self.stage5_restore_backup)
         s5.recover_requested.connect(self.stage5_recover)
         s5.estop_requested.connect(self.emergency_stop)
+        s5.board_tour_requested.connect(self.start_board_hover_tour)
+        s5.reload_inference_requested.connect(self.stage5_reload_inference)
+        s5.save_finetune_requested.connect(self.stage5_save_finetune)
+        s5.nudge_joint_requested.connect(self.stage5_nudge_joint)
+        s5.star_select_requested.connect(self.stage5_select_star)
+        s5.star_next_requested.connect(self.stage5_next_star)
+        s5.star_seed_requested.connect(self.stage5_seed_star)
+        s5.outer_select_requested.connect(self.stage5_select_outer)
+        s5.outer_next_requested.connect(self.stage5_next_outer)
         self._connect_cross_anchor_signals()
         self._connect_learning_signals()
 
@@ -189,6 +209,10 @@ class MainWindow(QMainWindow):
         self.arm_worker.step_started.connect(self._on_step_started)
         self.arm_worker.sequence_finished.connect(self._on_sequence_finished)
         self.arm_worker.log_message.connect(lambda message: LOGGER.info("%s", message))
+        try:
+            self._refresh_star_status()
+        except Exception:
+            pass
 
     def connect_camera(self) -> None:
         if self.camera_worker is not None and self.camera_worker.isRunning():
@@ -263,6 +287,15 @@ class MainWindow(QMainWindow):
         # From TARGET_ABOVE/HOVERING, never jump directly to OBSERVE.
         if self.state_machine.snapshot().state == ArmState.HOVERING:
             self.start_stage5_safe_return()
+            return
+        if not self.controller.is_connected:
+            QMessageBox.warning(self, "回观察位", "请先连接串口")
+            return
+        if self.arm_worker.busy or self.state_machine.busy:
+            QMessageBox.warning(self, "回观察位", "机械臂忙，请稍候或急停后恢复再试")
+            return
+        if self.state_machine.snapshot().state == ArmState.ESTOP:
+            QMessageBox.warning(self, "回观察位", "当前急停锁存：请先点「急停后恢复」，再回观察位")
             return
         if self.state_machine.state == ArmState.OBSERVE_HOLD:
             answer = QMessageBox.warning(
@@ -412,12 +445,66 @@ class MainWindow(QMainWindow):
         self._refresh_ui(current_action=step_name)
 
     def _on_sequence_finished(self, name: str, success: bool, message: str) -> None:
+        if name in {"CROSS_REVERIFY_TOUR", "BOARD_HOVER_TOUR"}:
+            self._finish_hover_tour(name, success=success, message=message)
+            return
+        if name in {"CROSS_CARRY_HIGH", "CROSS_TARGET_ABOVE", "CROSS_SAFE_RETURN"}:
+            # CROSS_TARGET_ABOVE ends with the arm parked over the board. Keep
+            # vision frozen until its safe-return sequence has actually ended.
+            self._set_camera_arm_busy(success and name == "CROSS_TARGET_ABOVE")
+            try:
+                if (self.state_machine.snapshot().current_action or "").startswith("MANUAL:"):
+                    self.state_machine.complete_manual()
+            except Exception as exc:
+                LOGGER.warning("cross complete_manual: %s", exc)
+            self.cross_wizard.mark_live_plan_finished(name, success=success)
+            if success and name == "CROSS_SAFE_RETURN":
+                self.cross_wizard.mark_safe_return_completed()
+                try:
+                    self._log_transition(self.state_machine.mark_observe_idle())
+                except Exception as exc:
+                    LOGGER.warning("mark_observe_idle failed: %s", exc)
+            panel = self.control_panel.cross_anchor_panel
+            panel.append_log(
+                f"LIVE 完成 name={name} success={success} msg={message or '-'}"
+            )
+            if success:
+                # Count real sends as number of action steps roughly
+                plan = self._cross_last_plan
+                if plan is not None:
+                    self.cross_wizard.real_serial_write_count += len(plan.action_names)
+                panel.append_log(
+                    f"REAL_SERIAL_WRITE_COUNT={self.cross_wizard.real_serial_write_count}"
+                )
+            self._cross_live_plan_name = None
+            # After live cross move, arm state is UNKNOWN from complete_manual; ask user return observe
+            if success and name != "CROSS_SAFE_RETURN":
+                panel.append_log("提示：请点「生成安全返回计划」并执行，或日常区回观察位")
+            self._refresh_cross_panel()
+            self._refresh_ui()
+            return
         if self.stage5.on_sequence_finished(name, success, message):
-            self._set_camera_arm_busy(False)
+            # Worker "finished" only means motion stopped. HOVER_TO_TARGET
+            # deliberately leaves the arm parked over the board, where it can
+            # continue hiding the top-left AprilTag. Release the frozen board
+            # pose only after SAFE_RETURN_FROM_HOVER (or a failed hover).
+            keep_frozen = bool(success and name == "HOVER_TO_TARGET")
+            self._set_camera_arm_busy(keep_frozen)
             if success and name == "SAFE_RETURN_FROM_HOVER":
-                self.board_locked = False
+                # Keep board lock if camera still has a valid pose so user can
+                # immediately click the next intersection. Soft relocalize only.
                 if self.camera_worker is not None:
                     self.camera_worker.request_relocalize()
+                # Clear previous target so next click selects a fresh point.
+                try:
+                    self.stage5.clear_target()
+                except Exception:
+                    pass
+                if self.camera_worker is not None:
+                    self.camera_worker.set_selected_target(None, None)
+                self.camera_panel.set_target_text("目标: 请再点画面交点")
+                LOGGER.info("STAGE5 ready for next click; board_locked=%s", self.board_locked)
+            self._sync_stage5_context(reason=f"sequence_finished:{name}")
             self._refresh_stage5_ui()
             self._refresh_ui()
             return
@@ -499,6 +586,7 @@ class MainWindow(QMainWindow):
         self._refresh_ui()
 
     def _set_camera_arm_busy(self, busy: bool) -> None:
+        """Freeze vision while the arm moves or remains parked over the board."""
         if self.camera_worker is not None:
             self.camera_worker.set_arm_busy(busy)
 
@@ -552,9 +640,27 @@ class MainWindow(QMainWindow):
             if self.camera_worker is not None:
                 self.camera_worker.set_selected_target(selection.row, selection.col)
             self.camera_panel.set_target_text(f"目标: P({selection.row},{selection.col})")
+            self._refresh_stage5_ui()
+            # Auto-fill inferred PWM into editors for fine-tuning.
+            if self.stage5.target.pwm:
+                self.control_panel.stage5_panel.set_pwm_values(self.stage5.target.pwm)
+                LOGGER.info(
+                    "[STAGE5][CLICK_INFER] P(%s,%s) source=%s pwm=%s",
+                    selection.row,
+                    selection.col,
+                    self.stage5.target.source,
+                    self.stage5.target.pwm,
+                )
+            else:
+                LOGGER.info(
+                    "[STAGE5][CLICK_INFER] P(%s,%s) no pwm source=%s",
+                    selection.row,
+                    selection.col,
+                    self.stage5.target.source,
+                )
         else:
             LOGGER.info("STAGE5 %s", selection.reason)
-        self._refresh_stage5_ui()
+            self._refresh_stage5_ui()
         self._refresh_ui()
 
     def on_stage5_dry_run(self, enabled: bool) -> None:
@@ -582,7 +688,22 @@ class MainWindow(QMainWindow):
     def start_stage5_hover(self) -> None:
         try:
             holding = self.state_machine.snapshot().state == ArmState.OBSERVE_HOLD
-            plan = self.stage5.plan_hover(holding_piece=holding)
+            pwm_override = None
+            try:
+                pwm_override = self.control_panel.stage5_panel.pwm_values()
+            except Exception:
+                pwm_override = None
+            # Remember editor PWM as the live target so later UI refresh won't show stale seed.
+            if pwm_override and self.stage5.target.row is not None:
+                self.stage5.target.pwm = dict(pwm_override)
+                self.stage5.target.source = "user_edited"
+                self.stage5.target.pwm_text = ", ".join(
+                    f"{k}:{pwm_override[k]}" for k in ("000", "001", "002", "003", "004")
+                    if k in pwm_override
+                )
+                self.stage5.target.calibrated_text = "NO"
+                self.stage5.target.calibrated = False
+            plan = self.stage5.plan_hover(holding_piece=holding, pwm_override=pwm_override)
             LOGGER.info(
                 "STAGE5 HOVER plan target=P(%s,%s) source=%s dry_run=%s duration_ms=%s commands=%s",
                 plan.target_row,
@@ -592,11 +713,32 @@ class MainWindow(QMainWindow):
                 plan.estimated_duration_ms,
                 plan.serial_commands,
             )
+            # Freeze after validation but before the worker can move the arm
+            # into the camera FOV. A rejected plan must not latch vision.
+            self._set_camera_arm_busy(True)
             submitted, mode = self.stage5.begin_hover_execution(plan)
             self._set_camera_arm_busy(True)
             if not submitted:
-                # Software dry-run completion after estimated duration (non-blocking).
+                LOGGER.warning(
+                    "STAGE5 HOVER DRY-RUN only (mode=%s). Uncheck DRY RUN for live send like manual P77_ABOVE.",
+                    mode,
+                )
+                QMessageBox.information(
+                    self,
+                    "阶段五悬停 = 仅演练（臂不会动）",
+                    "当前不会驱动机械臂。\n\n"
+                    "原因：Stage5 勾选了 DRY RUN（或 FORCE_STAGE5_DRY_RUN）。\n"
+                    "手动调试里的 P77_ABOVE 会真实发送，所以能动。\n\n"
+                    "真机悬停：\n"
+                    "1. 取消勾选 Stage5 的 DRY RUN\n"
+                    "2. 确认 Arm=OBSERVE_IDLE、BOARD LOCKED、目标 P(7,7)\n"
+                    "3. 再点「悬停到目标点」\n\n"
+                    f"计划: {plan.sequence.action_names}\n"
+                    f"预计: {plan.estimated_duration_ms} ms",
+                )
                 QTimer.singleShot(max(50, plan.estimated_duration_ms), self._finish_stage5_hover_dry_run)
+            else:
+                LOGGER.info("STAGE5 HOVER LIVE submitted to arm worker (same path as serial TX)")
             self._refresh_stage5_ui()
             self._refresh_ui(current_action="HOVER_TO_TARGET")
         except Exception as exc:
@@ -619,9 +761,14 @@ class MainWindow(QMainWindow):
         LOGGER.info("STAGE5 DRY-RUN hover complete (ESTIMATED_MOTION_COMPLETE)")
 
     def start_stage5_safe_return(self) -> None:
+        """Stage5 button 2: safe return from hover, else same as main 回观察位."""
+        if not self.stage5.stage_state.can_safe_return():
+            # Allow early/anytime return when not currently hovering a target.
+            self.start_return_to_observe()
+            return
         try:
-            sequence, submitted = self.stage5.begin_safe_return()
             self._set_camera_arm_busy(True)
+            sequence, submitted = self.stage5.begin_safe_return()
             if not submitted:
                 duration = sum(
                     self.actions.get(step.action_name).duration_ms
@@ -645,12 +792,18 @@ class MainWindow(QMainWindow):
             return
         self.stage5.complete_return_dry_run()
         self._set_camera_arm_busy(False)
-        self.board_locked = False
+        try:
+            self.stage5.clear_target()
+        except Exception:
+            pass
         if self.camera_worker is not None:
             self.camera_worker.request_relocalize()
+            self.camera_worker.set_selected_target(None, None)
+        self.camera_panel.set_target_text("目标: 请再点画面交点")
+        self._sync_stage5_context(reason="dry_return_done")
         self._refresh_stage5_ui()
         self._refresh_ui()
-        LOGGER.info("STAGE5 DRY-RUN safe return complete (ESTIMATED_MOTION_COMPLETE)")
+        LOGGER.info("STAGE5 DRY-RUN safe return complete; ready for next click")
 
     def stage5_load_from_action(self) -> None:
         try:
@@ -666,16 +819,22 @@ class MainWindow(QMainWindow):
         if target.row is None or target.col is None:
             QMessageBox.warning(self, "设为标定点", "请先选择目标交点")
             return
-        if not self.stage5.store.is_anchor_point(target.row, target.col):
-            QMessageBox.warning(self, "设为标定点", f"P({target.row},{target.col}) 不在锚点集合中")
-            return
         try:
             pwm = self.control_panel.stage5_panel.pwm_values()
         except Exception as exc:
             QMessageBox.warning(self, "设为标定点", str(exc))
             return
         try:
-            self.stage5.store.upsert_anchor(target.row, target.col, pwm, calibrated=False)
+            self.stage5.store.upsert_anchor(
+                target.row,
+                target.col,
+                pwm,
+                calibrated=False,
+                require_anchor_set=False,
+                expand_grid=True,
+                skip_envelope_check=True,
+                notes="user fine-tune draft",
+            )
             LOGGER.info("STAGE5 draft anchor P(%s,%s) %s", target.row, target.col, pwm)
             self.stage5.select_target_programmatically(target.row, target.col, self.config.vision.board_size)
             self._refresh_stage5_ui()
@@ -683,19 +842,8 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "设为标定点", str(exc))
 
     def stage5_save_anchor(self) -> None:
-        target = self.stage5.target
-        if target.row is None or target.col is None:
-            QMessageBox.warning(self, "保存锚点", "请先选择目标交点")
-            return
-        try:
-            pwm = self.control_panel.stage5_panel.pwm_values()
-            self.stage5.store.upsert_anchor(target.row, target.col, pwm, calibrated=False)
-            self.stage5.store.save()
-            LOGGER.info("STAGE5 saved anchor P(%s,%s)", target.row, target.col)
-            self.stage5.select_target_programmatically(target.row, target.col, self.config.vision.board_size)
-            self._refresh_stage5_ui()
-        except Exception as exc:
-            QMessageBox.warning(self, "保存锚点", str(exc))
+        """Legacy advanced save — same as fine-tune without confirm dialog."""
+        self.stage5_save_finetune(confirm=False)
 
     def stage5_confirm_anchor(self) -> None:
         target = self.stage5.target
@@ -776,6 +924,507 @@ class MainWindow(QMainWindow):
 
 
 
+
+
+    def stage5_reload_inference(self) -> None:
+        """Recompute interpolated PWM for current click and fill editors."""
+        target = self.stage5.target
+        if target.row is None or target.col is None:
+            QMessageBox.warning(self, "载入推理", "请先点击画面交点")
+            return
+        self.stage5.select_target_programmatically(
+            target.row, target.col, self.config.vision.board_size
+        )
+        self._refresh_stage5_ui()
+        pwm = self.stage5.target.pwm
+        if not pwm:
+            QMessageBox.warning(
+                self,
+                "载入推理",
+                f"P({target.row},{target.col}) 当前无法推理 PWM（{self.stage5.target.source}）",
+            )
+            return
+        self.control_panel.stage5_panel.set_pwm_values(pwm)
+        LOGGER.info(
+            "[STAGE5][INFER] P(%s,%s) source=%s pwm=%s",
+            target.row,
+            target.col,
+            self.stage5.target.source,
+            pwm,
+        )
+
+    def stage5_nudge_joint(self, joint_id: str, delta: int) -> None:
+        panel = self.control_panel.stage5_panel
+        try:
+            values = panel.pwm_values()
+        except Exception:
+            # empty fields: try inference first
+            self.stage5_reload_inference()
+            try:
+                values = panel.pwm_values()
+            except Exception as exc:
+                QMessageBox.warning(self, "微调", str(exc))
+                return
+        jid = str(joint_id).zfill(3)
+        if jid not in values:
+            return
+        values[jid] = max(500, min(2500, int(values[jid]) + int(delta)))
+        panel.set_pwm_values(values)
+        LOGGER.info("[STAGE5][NUDGE] %s %+d -> %s", jid, delta, values[jid])
+        # Coach: edited PWM is only used when user clicks hover again.
+        panel.next_label.setText(
+            f"已改 {jid}={values[jid]}。请：回观察位 → 点「1.用当前PWM去悬停」验证 → 满意再点「3.保存」"
+        )
+        if hasattr(panel, "_style_next"):
+            panel._style_next("orange")
+
+    def stage5_save_finetune(self, confirm: bool = True) -> None:
+        """Save current editor PWM as calibrated taught point; expands grid for midpoints."""
+        target = self.stage5.target
+        if target.row is None or target.col is None:
+            QMessageBox.warning(self, "保存微调点", "请先点击画面交点")
+            return
+        try:
+            pwm = self.control_panel.stage5_panel.pwm_values()
+        except Exception as exc:
+            QMessageBox.warning(self, "保存微调点", str(exc))
+            return
+        if confirm:
+            reply = QMessageBox.question(
+                self,
+                "保存微调点",
+                (
+                    f"将 P({target.row},{target.col}) 的当前 PWM 写入正式标定？\n"
+                    f"PWM={pwm}\n\n"
+                    "会扩展插值网格（该行/列成为锚线），之后巡检/悬停将优先用此手教值。"
+                ),
+            )
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+        try:
+            from app.stage5.safety import derive_calibration_limits
+
+            self.stage5.store.upsert_anchor(
+                target.row,
+                target.col,
+                pwm,
+                time_ms=1000,
+                notes="user fine-tune taught point",
+                calibrated=True,
+                verified_runs=max(1, int(getattr(self.stage5.target, "verified_runs", 0) or 0)),
+                require_anchor_set=False,
+                expand_grid=True,
+                safety_limits=derive_calibration_limits(self.actions),
+                skip_envelope_check=False,
+            )
+            path = self.stage5.store.save()
+            LOGGER.info(
+                "[STAGE5][FINETUNE_SAVED] P(%s,%s) pwm=%s path=%s rows=%s cols=%s",
+                target.row,
+                target.col,
+                pwm,
+                path,
+                self.stage5.store.anchor_rows,
+                self.stage5.store.anchor_cols,
+            )
+            self.stage5.select_target_programmatically(
+                target.row, target.col, self.config.vision.board_size
+            )
+            self._refresh_stage5_ui(push_pwm=True)
+            self._refresh_star_status()
+            QMessageBox.information(
+                self,
+                "已保存",
+                f"P({target.row},{target.col}) 已写入标定。\n"
+                f"网格 rows={self.stage5.store.anchor_rows}\n"
+                f"cols={self.stage5.store.anchor_cols}",
+            )
+        except Exception as exc:
+            LOGGER.exception("finetune save failed")
+            QMessageBox.warning(self, "保存微调点失败", str(exc))
+
+    def test_beep(self) -> None:
+        """Manual buzzer test for factory firmware + host fallback."""
+        if not self.controller.is_connected:
+            QMessageBox.warning(self, "蜂鸣测试", "请先连接串口")
+            return
+        ok = self._beep_once()
+        QMessageBox.information(
+            self,
+            "蜂鸣测试",
+            (
+                "已发送：\n"
+                "1) 本机扬声器/蜂鸣（应能听到）\n"
+                "2) 串口候选 $BEEP / beep,n\n\n"
+                f"结果 host/arm 见日志 [TOUR][BEEP]。\n"
+                f"综合={'有提示' if ok else '失败'}。\n\n"
+                "若仅本机响、机械臂不响：当前出厂固件未实现蜂鸣指令，"
+                "完成提示以本机声为准（无需改舵机动作）。"
+            ),
+        )
+
+
+
+    def _refresh_star_status(self) -> None:
+        lines = []
+        for r, c, _lab, cn in STAR_CORNERS:
+            a = self.stage5.store.get_anchor(r, c)
+            if a is not None and a.calibrated:
+                mark = "已校准"
+            else:
+                mark = "默认/未教"
+            lines.append(f"P({r},{c}){cn}={mark}")
+        self.control_panel.stage5_panel.update_star_status(lines, self._star_index)
+
+    def stage5_select_star(self, index: int) -> None:
+        if not 0 <= int(index) < len(STAR_CORNERS):
+            return
+        self._star_index = int(index)
+        row, col, lab, cn = STAR_CORNERS[self._star_index]
+        self.stage5.select_target_programmatically(row, col, self.config.vision.board_size)
+        if self.camera_worker is not None:
+            self.camera_worker.set_selected_target(row, col)
+        self.camera_panel.set_target_text(f"目标: P({row},{col}) {cn}")
+        self._refresh_stage5_ui()
+
+        anchor = self.stage5.store.get_anchor(row, col)
+        taught = anchor is not None and anchor.calibrated
+        if taught and anchor is not None:
+            self.control_panel.stage5_panel.set_pwm_values(anchor.pwm)
+            LOGGER.info("[STAGE5][STAR] P(%s,%s) taught pwm=%s", row, col, anchor.pwm)
+        else:
+            # Prefer current resolve, else parallelogram seed — no popup.
+            pwm = self.stage5.target.pwm
+            if not pwm:
+                try:
+                    seed = estimate_star_corner_pwm(self.stage5.store, row, col)
+                    pwm = seed.pwm_str_keys()
+                    LOGGER.info("[STAGE5][STAR] P(%s,%s) seed=%s", row, col, pwm)
+                except Exception as exc:
+                    LOGGER.warning("[STAGE5][STAR] no pwm: %s", exc)
+                    pwm = None
+            if pwm:
+                self.control_panel.stage5_panel.set_pwm_values(pwm)
+        self._refresh_star_status()
+        self._refresh_ui()
+
+    def stage5_next_star(self) -> None:
+        # Prefer first uncalibrated star; else cycle.
+        for offset in range(len(STAR_CORNERS)):
+            idx = (self._star_index + offset) % len(STAR_CORNERS)
+            r, c, _l, _cn = STAR_CORNERS[idx]
+            a = self.stage5.store.get_anchor(r, c)
+            if a is None or not a.calibrated:
+                self.stage5_select_star(idx)
+                return
+        self._star_index = (self._star_index + 1) % len(STAR_CORNERS)
+        self.stage5_select_star(self._star_index)
+
+    def stage5_seed_star(self) -> None:
+        """Load parallelogram seed for current star corner into editors (no popup)."""
+        row, col, lab, cn = STAR_CORNERS[self._star_index]
+        try:
+            seed = estimate_star_corner_pwm(self.stage5.store, row, col)
+        except Exception as exc:
+            LOGGER.warning("[STAGE5][STAR_SEED] %s", exc)
+            return
+        self.stage5.select_target_programmatically(row, col, self.config.vision.board_size)
+        if self.camera_worker is not None:
+            self.camera_worker.set_selected_target(row, col)
+        self.camera_panel.set_target_text(f"目标: P({row},{col}) {cn}")
+        self.control_panel.stage5_panel.set_pwm_values(seed.pwm_str_keys())
+        self._refresh_stage5_ui()
+        self._refresh_star_status()
+        LOGGER.info(
+            "[STAGE5][STAR_SEED] P(%s,%s) from %s pwm=%s",
+            row, col, seed.anchors_used, seed.pwm_str_keys(),
+        )
+
+
+
+    def _refresh_outer_status(self) -> None:
+        lines = []
+        for r, c, _lab, cn in OUTER_RING:
+            a = self.stage5.store.get_anchor(r, c)
+            mark = "已校准" if (a is not None and a.calibrated) else "未教"
+            lines.append(f"P({r},{c}){cn}={mark}")
+        self.control_panel.stage5_panel.update_outer_status(lines, self._outer_index)
+
+    def stage5_select_outer(self, index: int) -> None:
+        if not 0 <= int(index) < len(OUTER_RING):
+            return
+        self._outer_index = int(index)
+        row, col, lab, cn = OUTER_RING[self._outer_index]
+        self.stage5.select_target_programmatically(row, col, self.config.vision.board_size)
+        if self.camera_worker is not None:
+            self.camera_worker.set_selected_target(row, col)
+        self.camera_panel.set_target_text(f"目标: P({row},{col}) {cn}")
+        self._refresh_stage5_ui()
+        anchor = self.stage5.store.get_anchor(row, col)
+        if anchor is not None and anchor.calibrated:
+            self.control_panel.stage5_panel.set_pwm_values(anchor.pwm)
+            LOGGER.info("[STAGE5][OUTER] taught P(%s,%s) %s", row, col, anchor.pwm)
+        else:
+            pwm = self.stage5.target.pwm
+            if not pwm:
+                try:
+                    seed = estimate_outer_ring_pwm(self.stage5.store, row, col)
+                    pwm = seed.pwm_str_keys()
+                    LOGGER.info("[STAGE5][OUTER] seed P(%s,%s) %s %s", row, col, seed.details, pwm)
+                except Exception as exc:
+                    LOGGER.warning("[STAGE5][OUTER] no pwm: %s", exc)
+                    pwm = None
+            if pwm:
+                self.control_panel.stage5_panel.set_pwm_values(pwm)
+        self._refresh_outer_status()
+        self._refresh_ui()
+
+    def stage5_next_outer(self) -> None:
+        for offset in range(len(OUTER_RING)):
+            idx = (self._outer_index + offset) % len(OUTER_RING)
+            r, c, _l, _cn = OUTER_RING[idx]
+            a = self.stage5.store.get_anchor(r, c)
+            if a is None or not a.calibrated:
+                self.stage5_select_outer(idx)
+                return
+        self._outer_index = (self._outer_index + 1) % len(OUTER_RING)
+        self.stage5_select_outer(self._outer_index)
+
+
+    def start_cross_reverify_tour(self) -> None:
+        """One-click re-verify all completed cross anchors; beep once on success."""
+        panel = self.control_panel.cross_anchor_panel
+        try:
+            self.stage5.store.reload()
+            self.cross_wizard.drafts.reload()
+            promoted = sync_completed_drafts_into_calibration(
+                self.stage5.store,
+                self.cross_wizard.drafts._data if hasattr(self.cross_wizard.drafts, "_data") else {},
+                safety_limits=derive_calibration_limits(self.actions),
+            )
+            if promoted:
+                panel.append_log(f"已补写正式标定: {', '.join(promoted)}")
+                LOGGER.info("[TOUR] promoted drafts into calibration: %s", promoted)
+            drafts_payload = getattr(self.cross_wizard.drafts, "_data", None)
+            plan = build_cross_reverify_tour(
+                self.actions,
+                self.stage5.store,
+                drafts=drafts_payload,
+                dwell_ms=450,
+                action_wait_margin_ms=self.config.timing.action_wait_margin_ms,
+            )
+        except Exception as exc:
+            panel.append_log(f"ERROR 复验计划失败: {exc}")
+            QMessageBox.warning(self, "复验计划失败", str(exc))
+            return
+        self._start_hover_tour(plan, log_panel=panel)
+
+    def start_board_hover_tour(self) -> None:
+        """Board tour with mode choice: anchors-only (accurate) or full+thermal cool."""
+        chooser = QMessageBox(self)
+        chooser.setWindowTitle("棋盘巡检模式")
+        chooser.setIcon(QMessageBox.Icon.Question)
+        chooser.setText(
+            "一键复验(锚点)准确、全点巡检容易越跑越偏，常见原因：\n"
+            "1) 中间点是插值估算，不是手教 PWM\n"
+            "2) 连续动作舵机发热，开环漂移\n\n"
+            "请选择本轮模式："
+        )
+        btn_anchors = chooser.addButton("仅锚点（推荐，准）", QMessageBox.ButtonRole.AcceptRole)
+        btn_full = chooser.addButton("全可达点+分段冷却", QMessageBox.ButtonRole.ActionRole)
+        btn_cancel = chooser.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+        chooser.setDefaultButton(btn_anchors)
+        chooser.exec()
+        clicked = chooser.clickedButton()
+        if clicked is None or clicked is btn_cancel:
+            return
+        direct_only = clicked is btn_anchors
+        try:
+            self.stage5.store.reload()
+            self.cross_wizard.drafts.reload()
+            promoted = sync_completed_drafts_into_calibration(
+                self.stage5.store,
+                getattr(self.cross_wizard.drafts, "_data", {}) or {},
+                safety_limits=derive_calibration_limits(self.actions),
+            )
+            if promoted:
+                LOGGER.info("[TOUR] promoted drafts into calibration: %s", promoted)
+            # Wide teaching limits so taught extremes (e.g. P11,7) are not rejected.
+            plan = build_board_reachable_tour(
+                self.actions,
+                self.stage5.store,
+                limits=derive_calibration_limits(self.actions),
+                dwell_ms=400 if direct_only else 350,
+                action_wait_margin_ms=self.config.timing.action_wait_margin_ms,
+                direct_only=direct_only,
+                # Anchors are few: no cool needed. Full tour: cool every 4 points ~4s.
+                cool_every_n=0 if direct_only else 3,
+                cool_ms=0 if direct_only else 6000,
+                path_mode="carry_each" if direct_only else "segment",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "巡检计划失败", str(exc))
+            LOGGER.error("BOARD TOUR plan failed: %s", exc)
+            return
+        self._start_hover_tour(plan, log_panel=self.control_panel.cross_anchor_panel)
+
+    def _start_hover_tour(self, plan, *, log_panel) -> None:
+        stops_txt = ", ".join(f"P({s.row},{s.col})" for s in plan.stops)
+        est_s = plan.estimated_duration_ms / 1000.0
+        dry_checked = self.control_panel.stage5_panel.dry_run_checkbox.isChecked()
+        mode_txt = "DRY RUN（只日志）" if dry_checked else "真机 LIVE"
+        answer = QMessageBox.question(
+            self,
+            plan.display_name,
+            (
+                f"模式: {mode_txt}\n"
+                f"点数: {len(plan.stops)}\n"
+                f"路径: {stops_txt}\n"
+                f"预计约 {est_s:.1f}s\n"
+                f"备注: {', '.join(plan.notes[:6])}\n"
+                f"成功结束后蜂鸣 1 次\n\n"
+                "确认开始？"
+            ),
+            QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+            QMessageBox.StandardButton.Cancel,
+        )
+        if answer != QMessageBox.StandardButton.Ok:
+            log_panel.append_log("巡检已取消")
+            return
+        if not self.controller.is_connected:
+            QMessageBox.warning(self, "未连接", "请先连接串口（或 dry-run 模拟连接）。")
+            return
+        if self.arm_worker.busy or self.state_machine.busy:
+            QMessageBox.warning(self, "动作忙", "已有机械臂动作正在执行。")
+            return
+
+        log_panel.append_log(
+            f"TOUR start name={plan.name} stops={len(plan.stops)} dry={int(dry_checked)} est_ms={plan.estimated_duration_ms}"
+        )
+        for stop in plan.stops:
+            log_panel.append_log(
+                f"  stop P({stop.row},{stop.col}) src={stop.source} pwm={stop.pwm}"
+            )
+        LOGGER.info(
+            "[TOUR][START] name=%s stops=%s dry=%s duration_ms=%s",
+            plan.name,
+            len(plan.stops),
+            int(dry_checked),
+            plan.estimated_duration_ms,
+        )
+
+        self._active_tour = plan
+        self._active_tour_dry = bool(dry_checked)
+        try:
+            self.state_machine.begin_manual(plan.name)
+        except InvalidTransition as exc:
+            self._active_tour = None
+            QMessageBox.warning(self, "状态不允许", str(exc))
+            return
+
+        if dry_checked or self.controller.dry_run:
+            # Log each command without submitting to worker queue semantics for multi-min waits.
+            for step in plan.sequence.steps:
+                if hasattr(step, "action_name"):
+                    action = self.actions.get(step.action_name)
+                    LOGGER.info("[TOUR][DRY] TX %s %s", action.name, action.command)
+                    log_panel.append_log(f"DRY TX {action.name}")
+                else:
+                    LOGGER.info("[TOUR][DRY] WAIT %s %sms", step.label, step.duration_ms)
+                    log_panel.append_log(f"DRY WAIT {step.label} {step.duration_ms}ms")
+            QTimer.singleShot(
+                max(200, min(plan.estimated_duration_ms, 3000)),
+                lambda: self._finish_hover_tour(plan.name, success=True, message="dry_run_complete"),
+            )
+            self._set_camera_arm_busy(True)
+            self._refresh_ui()
+            return
+
+        if not self.arm_worker.submit(plan.sequence):
+            self._active_tour = None
+            try:
+                self.state_machine.fail("tour submit rejected")
+            except Exception:
+                pass
+            QMessageBox.warning(self, "提交失败", "ArmSequenceWorker 拒绝了巡检序列")
+            return
+        self._set_camera_arm_busy(True)
+        self._refresh_ui()
+
+    def _finish_hover_tour(self, name: str, *, success: bool, message: str) -> None:
+        plan = self._active_tour
+        self._active_tour = None
+        self._set_camera_arm_busy(False)
+        panel = self.control_panel.cross_anchor_panel
+        if success:
+            try:
+                self.state_machine.mark_observe_idle()
+            except Exception as exc:
+                LOGGER.warning("tour mark_observe_idle failed: %s", exc)
+                try:
+                    self.state_machine.complete_manual()
+                except Exception:
+                    pass
+            beep_ok = self._beep_once()
+            stop_n = 0 if plan is None else len(plan.stops)
+            panel.append_log(
+                f"TOUR DONE name={name} success=1 stops={stop_n} beep={'ok' if beep_ok else 'fail/skip'} msg={message or '-'}"
+            )
+            LOGGER.info("[TOUR][DONE] name=%s success=1 beep=%s", name, int(beep_ok))
+            QMessageBox.information(
+                self,
+                "巡检完成",
+                f"{name} 完成，共 {stop_n} 点。\n蜂鸣: {'已发送' if beep_ok else '发送失败/未支持（见日志）'}",
+            )
+        else:
+            try:
+                self.state_machine.fail(message or f"{name} failed")
+            except Exception:
+                pass
+            panel.append_log(f"TOUR FAIL name={name} msg={message or '-'}")
+            LOGGER.error("[TOUR][FAIL] name=%s msg=%s", name, message)
+            QMessageBox.warning(self, "巡检失败", message or name)
+        self._sync_stage5_context(reason=f"tour_finished:{name}:{success}")
+        self._refresh_cross_panel()
+        self._refresh_stage5_ui()
+        self._refresh_ui()
+
+
+    def _beep_once(self) -> bool:
+        """Completion cue. Host beep is authoritative; arm commands best-effort."""
+        host_ok = False
+        try:
+            import winsound
+            # Longer, louder pattern so it is hard to miss on Windows.
+            winsound.MessageBeep(winsound.MB_ICONASTERISK)
+            winsound.Beep(1500, 220)
+            winsound.Beep(1200, 180)
+            winsound.Beep(1500, 220)
+            host_ok = True
+        except Exception:
+            try:
+                from PySide6.QtWidgets import QApplication
+                for _ in range(3):
+                    QApplication.beep()
+                host_ok = True
+            except Exception:
+                pass
+
+        arm_ok = False
+        if self.controller.is_connected:
+            try:
+                sent = self.controller.beep(times=2, duration_ms=150)
+                arm_ok = bool(sent)
+                LOGGER.info("[BEEP] arm candidates sent=%s", [repr(s) for s in sent])
+            except Exception as exc:
+                LOGGER.warning("[BEEP] arm send failed: %s", exc)
+        else:
+            LOGGER.warning("[BEEP] serial not connected; host-only")
+
+        LOGGER.info("[BEEP] host=%s arm_tx=%s (arm hardware may ignore unknown cmds)", int(host_ok), int(arm_ok))
+        return host_ok or arm_ok
+
+
     def _connect_cross_anchor_signals(self) -> None:
         panel = self.control_panel.cross_anchor_panel
         panel.prev_requested.connect(lambda: self._cross_nav(-1))
@@ -795,51 +1444,73 @@ class MainWindow(QMainWindow):
         panel.result_requested.connect(self._cross_result)
         panel.complete_requested.connect(self._cross_complete)
         panel.cancel_confirm_requested.connect(self._cross_cancel)
+        panel.reverify_tour_requested.connect(self.start_cross_reverify_tour)
         self._refresh_cross_panel()
 
+
+    def _cross_pull_edits(self) -> bool:
+        """Sync QLineEdit candidate PWM into wizard before any action."""
+        panel = self.control_panel.cross_anchor_panel
+        try:
+            values = panel.read_candidate_pwm()
+            self.cross_wizard.apply_candidate_pwm(values, note="from_gui_edits")
+            return True
+        except Exception as exc:
+            panel.append_log(f"ERROR PWM输入无效: {exc}")
+            return False
+
     def _cross_nav(self, delta: int) -> None:
+        self._cross_pull_edits()
         if delta < 0:
             self.cross_wizard.prev_anchor()
         else:
             self.cross_wizard.next_anchor()
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_select_index(self, index: int) -> None:
+        self._cross_pull_edits()
         self.cross_wizard.select_index(int(index))
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_nudge(self, joint_id: str, delta: int) -> None:
+        if not self._cross_pull_edits():
+            return
         try:
             self.cross_wizard.nudge(joint_id, int(delta))
-            self.control_panel.cross_anchor_panel.append_log(f"nudge {joint_id} {delta:+d}")
+            self.control_panel.cross_anchor_panel.append_log(f"nudge {joint_id} {delta:+d} -> {self.cross_wizard.candidate_pwm[joint_id]}")
         except Exception as exc:
             self.control_panel.cross_anchor_panel.append_log(f"ERROR {exc}")
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_set_joint(self, joint_id: str, value: int) -> None:
         try:
             self.cross_wizard.set_joint(joint_id, int(value))
+            self.control_panel.cross_anchor_panel.append_log(f"set {joint_id}={value}")
         except Exception as exc:
             self.control_panel.cross_anchor_panel.append_log(f"ERROR {exc}")
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_reset_p77(self) -> None:
         self.cross_wizard.reset_to_p77()
         self.control_panel.cross_anchor_panel.append_log("reset to P77 reference")
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_undo(self) -> None:
         ok = self.cross_wizard.undo()
         self.control_panel.cross_anchor_panel.append_log("undo" if ok else "nothing to undo")
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_save_draft(self) -> None:
+        if not self._cross_pull_edits():
+            return
         try:
             entry = self.cross_wizard.save_draft()
-            self.control_panel.cross_anchor_panel.append_log(f"draft saved status={entry.get('status')}")
+            self.control_panel.cross_anchor_panel.append_log(
+                f"draft saved status={entry.get('status')} pwm={self.cross_wizard.candidate_pwm}"
+            )
         except Exception as exc:
             self.control_panel.cross_anchor_panel.append_log(f"ERROR save draft: {exc}")
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_load_draft(self) -> None:
         try:
@@ -847,15 +1518,19 @@ class MainWindow(QMainWindow):
             self.control_panel.cross_anchor_panel.append_log(f"draft loaded runs={entry.get('verified_runs')}")
         except Exception as exc:
             self.control_panel.cross_anchor_panel.append_log(f"ERROR load draft: {exc}")
-        self._refresh_cross_panel()
+        self._refresh_cross_panel(push_edits=True)
 
     def _cross_validate(self) -> None:
+        if not self._cross_pull_edits():
+            return
         issues = self.cross_wizard.validate_candidate()
         for issue in issues:
             self.control_panel.cross_anchor_panel.append_log(f"[{issue.level}] {issue.code}: {issue.message}")
         self._refresh_cross_panel()
 
     def _cross_plan(self, kind: str) -> None:
+        if not self._cross_pull_edits():
+            return
         try:
             if kind == "carry":
                 plan = self.cross_wizard.plan_carry_high_test()
@@ -874,26 +1549,106 @@ class MainWindow(QMainWindow):
         self._refresh_cross_panel()
 
     def _cross_execute_mock(self) -> None:
+        if not self._cross_pull_edits():
+            return
+        panel = self.control_panel.cross_anchor_panel
         plan = self._cross_last_plan
         if plan is None:
-            self.control_panel.cross_anchor_panel.append_log("ERROR no plan; generate one first")
+            panel.append_log("ERROR: generate a plan first, then execute")
             return
+        # Rebuild plan so candidate PWM edits are included in TARGET command
         try:
-            # Always mock under FORCE_STAGE5_DRY_RUN; never touch real serial.
-            sent = self.cross_wizard.execute_plan_mock(
+            if plan.name == "CROSS_TARGET_ABOVE":
+                plan = self.cross_wizard.plan_target_above_test()
+                self._cross_last_plan = plan
+                panel.append_log(f"rebuilt plan with pwm={self.cross_wizard.candidate_pwm}")
+            elif plan.name == "CROSS_CARRY_HIGH":
+                plan = self.cross_wizard.plan_carry_high_test()
+                self._cross_last_plan = plan
+            elif plan.name == "CROSS_SAFE_RETURN":
+                plan = self.cross_wizard.plan_safe_return()
+                self._cross_last_plan = plan
+        except Exception as exc:
+            panel.append_log(f"ERROR rebuild plan: {exc}")
+            return
+        dry_checked = self.control_panel.stage5_panel.dry_run_checkbox.isChecked()
+        try:
+            mode, payload = self.cross_wizard.execute_plan(
                 plan,
-                gui_dry_run_checked=self.control_panel.stage5_panel.dry_run_checkbox.isChecked(),
+                gui_dry_run_checked=dry_checked,
             )
-            for label, command in sent:
-                self.control_panel.cross_anchor_panel.append_log(f"MOCK_TX {label}: {command}")
-            self.control_panel.cross_anchor_panel.append_log(
+        except Exception as exc:
+            panel.append_log(f"ERROR execute: {exc}")
+            self._refresh_cross_panel()
+            return
+
+        if mode == "dry_run":
+            for label, command in payload:
+                panel.append_log(f"MOCK_TX {label}: {command}")
+            panel.append_log("MODE=DRY_RUN/MOCK (arm will NOT move)")
+            panel.append_log(
+                "For LIVE: 1) uncheck Stage5 DRY RUN  2) return to observe  3) Execute plan again"
+            )
+            panel.append_log(
                 f"REAL_SERIAL_WRITE_COUNT={self.cross_wizard.real_serial_write_count}"
             )
             if plan.name == "CROSS_SAFE_RETURN":
                 self.cross_wizard.mark_safe_return_completed()
+            self._refresh_cross_panel()
+            return
+
+        # LIVE path
+        sequence = payload
+        detail = "\n".join(sequence.action_names)
+        reply = QMessageBox.question(
+            self,
+            "Confirm LIVE motion",
+            f"Will send REAL serial actions:\n{sequence.display_name}\n{detail}\n\n"
+            f"Target P({self.cross_wizard.current_row},{self.cross_wizard.current_col})\n"
+            "Pump OFF. E-stop: $DST!\n\nProceed?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            panel.append_log("LIVE cancelled by user")
+            self._refresh_cross_panel()
+            return
+
+        if self.arm_worker.busy:
+            panel.append_log("ERROR arm busy")
+            return
+        if not self.controller.is_connected:
+            panel.append_log("ERROR serial not connected")
+            return
+        arm = self.state_machine.snapshot()
+        if arm.state not in {
+            ArmState.OBSERVE_IDLE,
+            ArmState.OBSERVE_HOLD,
+            ArmState.HOVERING,
+            ArmState.UNKNOWN,
+        }:
+            panel.append_log(f"ERROR Arm={arm.state.value}, return to observe first")
+            return
+        try:
+            if arm.state in {ArmState.OBSERVE_IDLE, ArmState.OBSERVE_HOLD, ArmState.UNKNOWN}:
+                self.state_machine.begin_manual(sequence.name)
+            ok = self.arm_worker.submit(sequence)
+            if not ok:
+                try:
+                    self.state_machine.complete_manual()
+                except Exception:
+                    pass
+                panel.append_log("ERROR worker rejected sequence")
+                return
+            self._cross_live_plan_name = sequence.name
+            self._set_camera_arm_busy(True)
+            panel.append_log(f"LIVE submitted: {sequence.name} {sequence.action_names}")
+            panel.append_log("Wait for TX in main log...")
+            LOGGER.info("CROSS LIVE submit %s", sequence.name)
         except Exception as exc:
-            self.control_panel.cross_anchor_panel.append_log(f"ERROR execute: {exc}")
+            panel.append_log(f"ERROR live submit: {exc}")
         self._refresh_cross_panel()
+
 
     def _cross_result(self, result: str) -> None:
         try:
@@ -923,9 +1678,9 @@ class MainWindow(QMainWindow):
         self.control_panel.cross_anchor_panel.append_log("cancelled confirmation flags")
         self._refresh_cross_panel()
 
-    def _refresh_cross_panel(self) -> None:
+    def _refresh_cross_panel(self, *, push_edits: bool = False) -> None:
         snap = self.cross_wizard.status_snapshot()
-        self.control_panel.cross_anchor_panel.update_view(snap)
+        self.control_panel.cross_anchor_panel.update_view(snap, push_edits=push_edits)
 
 
     def _connect_learning_signals(self) -> None:
@@ -1118,12 +1873,13 @@ class MainWindow(QMainWindow):
         if after == Stage5State.DISCONNECTED and not serial_connected:
             LOGGER.info("[STAGE5][STATE_BLOCKED] reason=SERIAL_NOT_CONNECTED")
 
-    def _refresh_stage5_ui(self) -> None:
+    def _refresh_stage5_ui(self, *, push_pwm: bool = False) -> None:
+        """Refresh Stage5 labels. Never clobber user PWM edits unless push_pwm=True."""
         snap = self.stage5.stage_state.snapshot()
         target = self.stage5.target
         panel = self.control_panel.stage5_panel
         arm = self.state_machine.snapshot()
-        if target.pwm:
+        if push_pwm and target.pwm:
             panel.set_pwm_values(target.pwm)
         panel.update_target_view(
             state=snap.state.value,
