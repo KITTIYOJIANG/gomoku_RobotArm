@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "model_name": "j1_factory_geometry_p77_calibrated_candidate",
+  "model_status": "CANDIDATE_NOT_PHYSICALLY_MEASURED",
+  "source": {
+    "inverse_kinematics": "firmware/stm32_j1_reference/src/z_kinematics.c",
+    "link_initialization": "firmware/stm32_j1_reference/USER/z_main.c:152",
+    "calibration": "stable P77_ABOVE/P77_TOUCH endpoint constraints",
+    "notes": [
+      "The copied firmware has IK but no FK.",
+      "The setup call uses 110/105/75/190 mm; its nearby comment conflicts.",
+      "Joint 002 installed direction is configured opposite to the copied formula.",
+      "Biases make stable P77 ABOVE and TOUCH share FK x/y and set ABOVE alpha=-55 deg.",
+      "These are candidate model parameters, not physical metrology."
+    ]
+  },
+  "links_mm": {
+    "L0": 110.0,
+    "L1": 105.0,
+    "L2": 75.0,
+    "L3": 190.0
+  },
+  "joints": {
+    "000": {
+      "role": "base_yaw",
+      "zero_pwm": 1500.0,
+      "direction": -1.0,
+      "degrees_per_pwm": 0.135,
+      "angle_bias_deg": 0.0,
+      "kinematic_offset_deg": 0.0,
+      "pwm_min": 550,
+      "pwm_max": 2450
+    },
+    "001": {
+      "role": "shoulder",
+      "zero_pwm": 1500.0,
+      "direction": 1.0,
+      "degrees_per_pwm": 0.135,
+      "angle_bias_deg": 35.32595960670788,
+      "kinematic_offset_deg": 90.0,
+      "pwm_min": 550,
+      "pwm_max": 2450
+    },
+    "002": {
+      "role": "elbow",
+      "zero_pwm": 1500.0,
+      "direction": -1.0,
+      "degrees_per_pwm": 0.135,
+      "angle_bias_deg": -14.534642111236085,
+      "kinematic_offset_deg": 0.0,
+      "pwm_min": 550,
+      "pwm_max": 2450
+    },
+    "003": {
+      "role": "tool_pitch",
+      "zero_pwm": 1500.0,
+      "direction": 1.0,
+      "degrees_per_pwm": 0.135,
+      "angle_bias_deg": -36.91060171794394,
+      "kinematic_offset_deg": 0.0,
+      "pwm_min": 550,
+      "pwm_max": 2450
+    },
+    "004": {
+      "role": "auxiliary_wrist_passthrough",
+      "participates_in_planar_kinematics": false,
+      "zero_pwm": 1500.0,
+      "direction": 1.0,
+      "degrees_per_pwm": 0.135,
+      "angle_bias_deg": 0.0,
+      "kinematic_offset_deg": 0.0,
+      "pwm_min": 550,
+      "pwm_max": 2450
+    }
+  },
+  "pump_joint_id": "005",
+  "unused_joint_ids": ["006", "007"],
+  "tool_alpha_range_deg": {
+    "min": -135.0,
+    "max": 0.0
+  },
+  "numeric_tolerance": {
+    "reach_mm": 0.000001,
+    "roundtrip_position_mm": 1.0,
+    "roundtrip_alpha_deg": 0.5
+  },
+  "p77_calibration": {
+    "above_action": "P77_ABOVE_IDLE",
+    "touch_action": "P77_TOUCH_HOLD",
+    "above_alpha_target_deg": -55.0,
+    "bias_fit": "minimum_norm_subject_to_equal_radial_xy_and_above_alpha",
+    "verified": false
+  }
+}

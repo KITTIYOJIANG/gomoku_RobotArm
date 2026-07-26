@@ -19,6 +19,7 @@ from app.arm.state import ArmState
 
 from .log_panel import LogPanel
 from .stage5_panel import Stage5Panel
+from .stage6_panel import Stage6Panel
 from .cross_anchor_panel import CrossAnchorPanel
 from .hover_learning_panel import HoverLearningPanel
 from .status_panel import StatusPanel
@@ -80,6 +81,7 @@ class ControlPanel(QWidget):
         self.status_panel = StatusPanel()
         self.log_panel = LogPanel()
         self.stage5_panel = Stage5Panel(default_dry_run=True)
+        self.stage6_panel = Stage6Panel()
         self.cross_anchor_panel = CrossAnchorPanel()
         self.hover_learning_panel = HoverLearningPanel()
 
@@ -90,6 +92,14 @@ class ControlPanel(QWidget):
         content_layout.addWidget(self._build_vision_debug_group())
         content_layout.addWidget(self._build_core_group())
         content_layout.addWidget(self.stage5_panel)
+        self._stage6_group = QGroupBox("阶段六下降标定（默认收起）")
+        self._stage6_group.setCheckable(True)
+        self._stage6_group.setChecked(False)
+        stage6_layout = QVBoxLayout(self._stage6_group)
+        stage6_layout.addWidget(self.stage6_panel)
+        self.stage6_panel.setVisible(False)
+        self._stage6_group.toggled.connect(self.stage6_panel.setVisible)
+        content_layout.addWidget(self._stage6_group)
         self._adv_cross = QGroupBox('高级：中心十字标定（默认收起）')
         self._adv_cross.setCheckable(True)
         self._adv_cross.setChecked(False)

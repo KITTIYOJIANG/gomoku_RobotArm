@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import logging
 from pathlib import Path
 
@@ -38,6 +39,13 @@ from app.stage5.tour_planner import (
     sync_completed_drafts_into_calibration,
 )
 from app.stage5.state_machine import Stage5Invalid, Stage5State
+from app.stage6.models import DescentLevel, LevelStatus, VerificationStage
+from app.stage6.planner import (
+    Stage6DescentPlanner,
+    Stage6ExecutionBlocked,
+    Stage6PlanningError,
+)
+from app.stage6.state_machine import Stage6MotionState
 from app.gui.camera_panel import CameraPanel
 from app.gui.control_panel import ControlPanel
 from app.logging_config import LogEmitter, QtLogHandler
@@ -98,6 +106,10 @@ class MainWindow(QMainWindow):
         )
         if not same:
             raise RuntimeError("Stage5 must share MainWindow SerialArmController instance")
+        self.stage6 = Stage6DescentPlanner(
+            controller=self.controller,
+            library=self.actions,
+        )
         self._selected_target_freeze = False
         draft_path = getattr(config.stage5, "cross_draft_path", None) or (config.logs_dir.parent / "calibration" / "stage5_cross_anchor_drafts.json")
         sample_path = getattr(config.stage5, "hover_samples_path", None) or (config.logs_dir.parent / "datasets" / "hover_pose" / "verified_samples.jsonl")
@@ -152,6 +164,11 @@ class MainWindow(QMainWindow):
         self.log_emitter.message.connect(self.control_panel.log_panel.append_message)
 
         self._connect_signals()
+        self._stage6_last_dwell_warning: str | None = None
+        self.stage6_thermal_timer = QTimer(self)
+        self.stage6_thermal_timer.setInterval(500)
+        self.stage6_thermal_timer.timeout.connect(self._poll_stage6_thermal)
+        self.stage6_thermal_timer.start()
         self.arm_worker.start()
         # Stage5 is created after controller; immediately pull current main context
         # so late construction never misses an already-connected COM/board/arm state.
@@ -202,6 +219,26 @@ class MainWindow(QMainWindow):
         s5.star_seed_requested.connect(self.stage5_seed_star)
         s5.outer_select_requested.connect(self.stage5_select_outer)
         s5.outer_next_requested.connect(self.stage5_next_outer)
+        s6 = panel.stage6_panel
+        s6.generate_current_requested.connect(self.stage6_generate_current)
+        s6.generate_all_requested.connect(self.stage6_generate_all)
+        s6.preview_requested.connect(self.stage6_preview)
+        s6.test_level_requested.connect(self.stage6_test_level)
+        s6.test_next_requested.connect(self.stage6_test_next)
+        s6.ascend_one_requested.connect(self.stage6_ascend_one)
+        s6.return_above_requested.connect(self.stage6_return_above)
+        s6.nudge_requested.connect(self.stage6_nudge)
+        s6.save_delta_requested.connect(self.stage6_save_delta)
+        s6.verify_level_requested.connect(self.stage6_verify_level)
+        s6.verify_profile_requested.connect(self.stage6_verify_profile)
+        s6.reset_delta_requested.connect(self.stage6_reset_delta)
+        s6.undo_requested.connect(self.stage6_undo)
+        s6.estop_requested.connect(self.emergency_stop)
+        s6.pump_off_requested.connect(self.pump_off)
+        s6.overheat_requested.connect(self.stage6_report_overheat)
+        s6.level_combo.currentIndexChanged.connect(
+            lambda _index: self._refresh_stage6_panel()
+        )
         self._connect_cross_anchor_signals()
         self._connect_learning_signals()
 
@@ -394,6 +431,7 @@ class MainWindow(QMainWindow):
         transition = self.state_machine.estop()
         self._log_transition(transition)
         self.stage5.estop()
+        self.stage6.state.emergency_stop()
         self._sync_stage5_context(reason="estop")
         self._set_camera_arm_busy(False)
         LOGGER.critical("EMERGENCY STOP LATCHED")
@@ -1914,7 +1952,241 @@ class MainWindow(QMainWindow):
             estop=snap.state == Stage5State.EMERGENCY_STOP or arm.state == ArmState.ESTOP,
         )
 
+    def stage6_generate_current(self, row: int, col: int) -> None:
+        try:
+            self.stage6.generate_descent_profile(row, col)
+            LOGGER.info("[STAGE6][GUI] generated P(%d,%d)", row, col)
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("生成当前点失败", exc)
+
+    def stage6_generate_all(self) -> None:
+        try:
+            result = self.stage6.generate_all_descent_profiles()
+            LOGGER.info(
+                "[STAGE6][GUI] batch requested=%d generated=%d rejected=%d",
+                result.requested,
+                result.generated_count,
+                result.rejected_count,
+            )
+            QMessageBox.information(
+                self,
+                "阶段六离线生成完成",
+                f"请求 {result.requested} 点；安全候选 {result.generated_count}；"
+                f"明确拒绝 {result.rejected_count}。\n"
+                "生成结果均未自动标记 verified。",
+            )
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("全棋盘生成失败", exc)
+
+    def stage6_preview(self, row: int, col: int) -> None:
+        try:
+            preview = self.stage6.preview_descent_profile(row, col)
+            LOGGER.info(
+                "[STAGE6][PREVIEW] %s",
+                json.dumps(preview, ensure_ascii=False, sort_keys=True),
+            )
+            QMessageBox.information(
+                self,
+                "DRY RUN 预览",
+                f"P({row},{col}) 共 {len(preview['commands'])} 个命令阶段；"
+                f"反向路径严格匹配={preview['reverse_is_exact']}。\n"
+                "完整 computed/delta/final 已写入日志。",
+            )
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("预览失败", exc)
+
+    def stage6_test_level(self, row: int, col: int, level: str) -> None:
+        try:
+            self.stage6.execute_descent_step(row, col, DescentLevel(level))
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("逐层测试被拒绝", exc)
+
+    def stage6_test_next(self, row: int, col: int) -> None:
+        next_level = {
+            Stage6MotionState.OBSERVE: DescentLevel.ABOVE,
+            Stage6MotionState.CARRY_HIGH: DescentLevel.ABOVE,
+            Stage6MotionState.RETURNED_ABOVE: DescentLevel.ABOVE,
+            Stage6MotionState.TARGET_ABOVE: DescentLevel.DESCENT_25,
+            Stage6MotionState.DESCENDING_25: DescentLevel.DESCENT_50,
+            Stage6MotionState.DESCENDING_50: DescentLevel.DESCENT_75,
+            Stage6MotionState.DESCENDING_75: DescentLevel.TOUCH,
+        }.get(self.stage6.state.state)
+        if next_level is None:
+            self._stage6_error(
+                "无法继续下降",
+                Stage6ExecutionBlocked(
+                    f"state={self.stage6.state.state.value}; use reverse ascent"
+                ),
+            )
+            return
+        self.stage6_test_level(row, col, next_level.value)
+
+    def stage6_ascend_one(self, row: int, col: int) -> None:
+        next_level = {
+            Stage6MotionState.TARGET_TOUCH: DescentLevel.DESCENT_75,
+            Stage6MotionState.RELEASE_DWELL: DescentLevel.DESCENT_75,
+            Stage6MotionState.ASCENDING_75: DescentLevel.DESCENT_50,
+            Stage6MotionState.ASCENDING_50: DescentLevel.DESCENT_25,
+            Stage6MotionState.ASCENDING_25: DescentLevel.ABOVE,
+        }.get(self.stage6.state.state)
+        if next_level is None:
+            self._stage6_error(
+                "无法抬升一层",
+                Stage6ExecutionBlocked(
+                    f"state={self.stage6.state.state.value}; no reverse step"
+                ),
+            )
+            return
+        try:
+            self.stage6.execute_ascent_step(row, col, next_level)
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("反向抬升被拒绝", exc)
+
+    def stage6_return_above(self, row: int, col: int) -> None:
+        try:
+            self.stage6.execute_reverse_ascent(row, col)
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("安全返回 ABOVE 被拒绝", exc)
+
+    def stage6_nudge(
+        self,
+        row: int,
+        col: int,
+        level: str,
+        joint_id: int,
+        amount: int,
+    ) -> None:
+        try:
+            self.stage6.thermal.record_tweak()
+            self.stage6.store.apply_delta(
+                row, col, DescentLevel(level), {joint_id: amount}
+            )
+            LOGGER.info(
+                "[STAGE6][DELTA] P(%d,%d) level=%s joint=%03d change=%+d final=%s",
+                row,
+                col,
+                level,
+                joint_id,
+                amount,
+                self.stage6.store.final_pwm(row, col, DescentLevel(level)),
+            )
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("微调失败", exc)
+
+    def stage6_save_delta(self, row: int, col: int, level: str) -> None:
+        try:
+            self.stage6.store.save()
+            LOGGER.info("[STAGE6][DELTA_SAVE] P(%d,%d) level=%s", row, col, level)
+        except Exception as exc:
+            self._stage6_error("保存修正失败", exc)
+
+    def stage6_verify_level(self, row: int, col: int, level: str) -> None:
+        if self.stage6.settings.force_dry_run:
+            self._stage6_error(
+                "当前不可标记通过",
+                Stage6ExecutionBlocked(
+                    "FORCE_DRY_RUN active: offline calculation cannot become verified"
+                ),
+            )
+            return
+        try:
+            self.stage6.store.mark_level(
+                row, col, DescentLevel(level), LevelStatus.VERIFIED
+            )
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("标记当前层失败", exc)
+
+    def stage6_verify_profile(self, row: int, col: int) -> None:
+        if self.stage6.settings.force_dry_run:
+            self._stage6_error(
+                "当前不可标记整条轨迹通过",
+                Stage6ExecutionBlocked(
+                    "FORCE_DRY_RUN active: real vertical/reverse tests are required"
+                ),
+            )
+            return
+        try:
+            profile = self.stage6.store.profile(row, col)
+            if not all(
+                value.get("status") == LevelStatus.VERIFIED.value
+                for value in profile["levels"].values()
+            ):
+                raise Stage6ExecutionBlocked("all five levels must be VERIFIED first")
+            self.stage6.store.set_verification_stage(
+                row,
+                col,
+                VerificationStage.VERTICAL_VERIFIED,
+                reverse_ascent_verified=True,
+            )
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("标记整条轨迹失败", exc)
+
+    def stage6_reset_delta(self, row: int, col: int, level: str) -> None:
+        try:
+            self.stage6.store.reset_delta(row, col, DescentLevel(level))
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("清零修正失败", exc)
+
+    def stage6_undo(self, row: int, col: int, level: str) -> None:
+        try:
+            self.stage6.store.undo_last(row, col, DescentLevel(level))
+            self._refresh_stage6_panel()
+        except Exception as exc:
+            self._stage6_error("恢复上一版本失败", exc)
+
+    def stage6_report_overheat(self) -> None:
+        self.stage6.report_overheat()
+        LOGGER.critical(
+            "[STAGE6][OVERHEAT_LOCK] no automatic motion; support arm and power off"
+        )
+        QMessageBox.critical(
+            self,
+            "舵机过热：已锁定新任务",
+            "不会尝试自动运动，也不会用 $DST! 代替断电处理。\n"
+            "请扶住机械臂后物理断电并充分冷却。",
+        )
+
+    def _refresh_stage6_panel(self) -> None:
+        panel = self.control_panel.stage6_panel
+        row, col = panel.target()
+        try:
+            panel.set_profile_view(self.stage6.store.profile(row, col))
+        except Exception:
+            pass
+        snapshot = self.stage6.state.snapshot()
+        panel.set_lock_state(snapshot.below_above, snapshot.lock_label)
+
+    def _stage6_error(self, title: str, exc: Exception) -> None:
+        LOGGER.warning("[STAGE6][GUI_BLOCKED] %s: %s", title, exc)
+        QMessageBox.warning(self, title, str(exc))
+
+    def _poll_stage6_thermal(self) -> None:
+        warning = self.stage6.thermal.dwell_warning()
+        if warning is None:
+            self._stage6_last_dwell_warning = None
+            return
+        if warning == self._stage6_last_dwell_warning:
+            return
+        self._stage6_last_dwell_warning = warning
+        LOGGER.warning("[STAGE6][THERMAL_DWELL] %s", warning)
+        QMessageBox.warning(
+            self,
+            "阶段六停留超时",
+            warning + "\n不会自动运动；请确认当前姿态后选择安全返回 ABOVE。",
+        )
+
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
+        self.stage6_thermal_timer.stop()
         if self.arm_worker.busy and self.controller.is_connected:
             self.arm_worker.cancel_pending()
             try:
