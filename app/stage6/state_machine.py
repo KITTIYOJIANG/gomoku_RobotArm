@@ -110,8 +110,31 @@ class Stage6StateMachine:
         target = (int(row), int(col))
         if self.locked_target is not None and self.locked_target != target:
             raise Stage6TransitionError(self.snapshot().lock_label)
+        if self.state not in {
+            Stage6MotionState.CARRY_HIGH,
+            Stage6MotionState.TARGET_ABOVE,
+            Stage6MotionState.RETURNED_ABOVE,
+        }:
+            raise Stage6TransitionError(
+                f"TARGET_ABOVE requires CARRY_HIGH, not {self.state.value}"
+            )
         self.locked_target = target
         self.state = Stage6MotionState.TARGET_ABOVE
+
+    def establish_carry_high(self) -> None:
+        """Explicitly synchronize a physically confirmed high transit pose."""
+        self._require_not_estopped()
+        if self.below_above:
+            raise Stage6TransitionError(self.snapshot().lock_label)
+        if self.state not in {
+            Stage6MotionState.OBSERVE,
+            Stage6MotionState.CARRY_HIGH,
+        }:
+            raise Stage6TransitionError(
+                f"cannot establish CARRY_HIGH from {self.state.value}"
+            )
+        self.state = Stage6MotionState.CARRY_HIGH
+        self.locked_target = None
 
     def require_target(self, row: int, col: int) -> None:
         target = (int(row), int(col))

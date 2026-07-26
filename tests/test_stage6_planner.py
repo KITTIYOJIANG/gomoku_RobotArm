@@ -103,6 +103,7 @@ def test_stage6_reverse_ascent_is_exact_descent_reverse(
 def test_stage6_low_position_target_switch_is_rejected(
     planner: Stage6DescentPlanner,
 ) -> None:
+    planner.state.establish_carry_high()
     planner.state.establish_above(7, 7)
     planner.state.descend(7, 7, DescentLevel.DESCENT_25)
     with pytest.raises(Stage6TransitionError, match="BELOW_ABOVE_LOCKED"):
@@ -112,6 +113,7 @@ def test_stage6_low_position_target_switch_is_rejected(
 def test_stage6_above_to_other_above_requires_carry_high(
     planner: Stage6DescentPlanner,
 ) -> None:
+    planner.state.establish_carry_high()
     planner.state.establish_above(7, 7)
     with pytest.raises(Stage6TransitionError):
         planner.state.establish_above(7, 8)
@@ -123,6 +125,7 @@ def test_stage6_above_to_other_above_requires_carry_high(
 def test_stage6_touch_cannot_move_directly_to_observe(
     planner: Stage6DescentPlanner,
 ) -> None:
+    planner.state.establish_carry_high()
     planner.state.establish_above(7, 7)
     for level in (
         DescentLevel.DESCENT_25,
@@ -133,6 +136,13 @@ def test_stage6_touch_cannot_move_directly_to_observe(
         planner.state.descend(7, 7, level)
     with pytest.raises(Stage6TransitionError, match="forbidden below ABOVE"):
         planner.state.move_to_observe()
+
+
+def test_stage6_observe_cannot_jump_directly_to_target_above(
+    planner: Stage6DescentPlanner,
+) -> None:
+    with pytest.raises(Stage6TransitionError, match="requires CARRY_HIGH"):
+        planner.state.establish_above(7, 7)
 
 
 def test_stage6_manual_delta_adds_and_recompute_preserves_it(

@@ -438,6 +438,8 @@ class Stage6DescentPlanner:
             reasons.append("target is occupied")
         if not arm_holding:
             reasons.append("arm is not HOLDING")
+        if self.state.state != Stage6MotionState.CARRY_HIGH:
+            reasons.append("Stage6 pose is not confirmed CARRY_HIGH")
         if not board_locked:
             reasons.append("BOARD not LOCKED")
         if not self.controller.is_connected:
@@ -472,6 +474,7 @@ class Stage6DescentPlanner:
         start = len(self.controller.dry_run_commands)
         events: list[str] = ["CARRY_HIGH_HOLD"]
         self.controller.send_action(self.library.get("CARRY_HIGH_P77_HOLD"))
+        self.state.establish_carry_high()
         self.execute_descent_step(7, 7, DescentLevel.ABOVE)
         events.append("P77_ABOVE_HOLD")
         for level in (

@@ -2007,7 +2007,6 @@ class MainWindow(QMainWindow):
 
     def stage6_test_next(self, row: int, col: int) -> None:
         next_level = {
-            Stage6MotionState.OBSERVE: DescentLevel.ABOVE,
             Stage6MotionState.CARRY_HIGH: DescentLevel.ABOVE,
             Stage6MotionState.RETURNED_ABOVE: DescentLevel.ABOVE,
             Stage6MotionState.TARGET_ABOVE: DescentLevel.DESCENT_25,

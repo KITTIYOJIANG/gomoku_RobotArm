@@ -220,14 +220,14 @@ OBSERVE and layer skipping are rejected.
 
 Dedicated Stage 6 suite:
 
-`24 passed`
+`25 passed`
 
 This includes the 20 explicitly requested offline cases plus GUI
 structure/locking and thermal-dwell checks.
 
 Whole repository:
 
-`146 passed, 5 failed`
+`147 passed, 5 failed`
 
 All five failures are pre-existing baseline inconsistencies in unchanged
 files. One test expects `P77_TOUCH_RELEASE` pump `1500`, while the stable action
