@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "board_size": 15,
+  "baseline_path": "calibration/stage5_board_calibration.json",
+  "sessions_dir": "calibration/sessions",
+  "current_deployment_path": "calibration/stage7_current_deployment.json",
+  "pick_pose_path": "calibration/stage7_pick_poses.json",
+  "default_dry_run": false,
+  "force_dry_run": false,
+  "live_jog_interval_ms": 80,
+  "live_jog_time_ms": 200
+}

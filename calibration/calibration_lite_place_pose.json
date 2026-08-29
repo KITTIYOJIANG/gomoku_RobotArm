@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-08-26T18:13:25+08:00",
+  "calibration_session": "2026-08-26_175549_quick_5",
+  "source": "quick_calibration_P77_ABOVE_plus_stable_descent_vector",
+  "motion_kind": "layered_pwm_descent_candidate_not_cartesian_movel",
+  "verified": true,
+  "above_pwm": {
+    "000": 1500,
+    "001": 1220,
+    "002": 870,
+    "003": 1230,
+    "004": 1500
+  },
+  "reference_descent_delta": {
+    "000": 0,
+    "001": -120,
+    "002": -10,
+    "003": 40,
+    "004": 0
+  },
+  "correction_delta": {
+    "000": 0,
+    "001": -20,
+    "002": -40,
+    "003": 40,
+    "004": 0
+  },
+  "new_pwm": {
+    "000": 1500,
+    "001": 1080,
+    "002": 820,
+    "003": 1310,
+    "004": 1500
+  }
+}

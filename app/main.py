@@ -13,11 +13,11 @@ from app.main_window import MainWindow
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="J1 Gomoku fixed-P77 arm integration")
+    parser = argparse.ArgumentParser(description="Gomoku Robot Integrated V1")
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Never open COM or move the arm; log commands through a simulated connection.",
+        help="Use the simulated serial boundary; never open a real COM port or move hardware.",
     )
     parser.add_argument(
         "--test-pattern",
@@ -38,7 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     session_log = configure_logging(config.logs_dir)
     logging.getLogger(__name__).info("START session=%s", session_log)
     app = QApplication(sys.argv[:1])
-    app.setApplicationName("J1 Gomoku Integrated")
+    app.setApplicationName("Gomoku Robot Integrated V1")
     window = MainWindow(
         config,
         dry_run=args.dry_run,

@@ -71,7 +71,10 @@ class ArmStateMachine:
 
     def can_return_to_observe(self) -> bool:
         with self._lock:
-            return not self._busy and self._state != ArmState.DISCONNECTED
+            return not self._busy and self._state not in {
+                ArmState.DISCONNECTED,
+                ArmState.ESTOP,
+            }
 
     def can_pick(self) -> bool:
         with self._lock:
@@ -91,6 +94,8 @@ class ArmStateMachine:
             self._require_idle()
             if self._state == ArmState.DISCONNECTED:
                 raise InvalidTransition("Connect COM before returning to observe")
+            if self._state == ArmState.ESTOP:
+                raise InvalidTransition("Recover from ESTOP before returning to observe")
             self._busy = True
             self._current_action = "RETURN_TO_OBSERVE"
             self._error = None
@@ -106,6 +111,16 @@ class ArmStateMachine:
                 raise InvalidTransition("Pick requires OBSERVE_IDLE")
             self._busy = True
             self._current_action = "PICK_PIECE"
+            return self._set_state(ArmState.PICKING)
+
+    def begin_pick_retry(self) -> tuple[ArmState, ArmState]:
+        with self._lock:
+            self._require_idle()
+            if self._state != ArmState.OBSERVE_HOLD:
+                raise InvalidTransition("Pick retry requires OBSERVE_HOLD")
+            self._busy = True
+            self._current_action = "PICK_PIECE"
+            self._error = None
             return self._set_state(ArmState.PICKING)
 
     def complete_pick(self) -> tuple[ArmState, ArmState]:
@@ -196,6 +211,22 @@ class ArmStateMachine:
     def complete_hover(self) -> tuple[ArmState, ArmState]:
         return self._complete("HOVER_TO_TARGET", ArmState.MOVING_TO_HOVER, ArmState.HOVERING)
 
+    def begin_stage7_hover(self) -> tuple[ArmState, ArmState]:
+        """Start camera-independent ABOVE calibration from OBSERVE_IDLE only."""
+        with self._lock:
+            self._require_idle()
+            if self._state != ArmState.OBSERVE_IDLE:
+                raise InvalidTransition("Stage 7 ABOVE calibration requires OBSERVE_IDLE")
+            self._busy = True
+            self._current_action = "STAGE7_MOVE_ABOVE"
+            self._error = None
+            return self._set_state(ArmState.MOVING_TO_HOVER)
+
+    def complete_stage7_hover(self) -> tuple[ArmState, ArmState]:
+        return self._complete(
+            "STAGE7_MOVE_ABOVE", ArmState.MOVING_TO_HOVER, ArmState.HOVERING
+        )
+
     def begin_return_from_hover(self) -> tuple[ArmState, ArmState]:
         with self._lock:
             self._require_idle()
@@ -205,6 +236,21 @@ class ArmStateMachine:
             self._current_action = "SAFE_RETURN_FROM_HOVER"
             self._error = None
             return self._set_state(ArmState.RETURNING_FROM_HOVER)
+
+    def begin_stage7_return(self) -> tuple[ArmState, ArmState]:
+        with self._lock:
+            self._require_idle()
+            if self._state != ArmState.HOVERING:
+                raise InvalidTransition("Stage 7 safe return requires HOVERING")
+            self._busy = True
+            self._current_action = "STAGE7_SAFE_RETURN"
+            self._error = None
+            return self._set_state(ArmState.RETURNING_FROM_HOVER)
+
+    def complete_stage7_return(self) -> tuple[ArmState, ArmState]:
+        return self._complete(
+            "STAGE7_SAFE_RETURN", ArmState.RETURNING_FROM_HOVER, ArmState.OBSERVE_IDLE
+        )
 
     def complete_return_from_hover(self, *, holding_piece: bool) -> tuple[ArmState, ArmState]:
         final = ArmState.OBSERVE_HOLD if holding_piece else ArmState.OBSERVE_IDLE
@@ -223,6 +269,16 @@ class ArmStateMachine:
             self._current_action = None
             self._error = "Emergency stop latched; user recovery required"
             return self._set_state(ArmState.ESTOP)
+
+    def recover_from_estop(self) -> tuple[ArmState, ArmState]:
+        """Explicitly clear an ESTOP/ERROR latch to UNKNOWN after hardware reset."""
+        with self._lock:
+            if self._state not in {ArmState.ESTOP, ArmState.ERROR}:
+                raise InvalidTransition("Nothing to recover")
+            self._busy = False
+            self._current_action = None
+            self._error = None
+            return self._set_state(ArmState.UNKNOWN)
 
     def fail(self, message: str) -> tuple[ArmState, ArmState]:
         with self._lock:

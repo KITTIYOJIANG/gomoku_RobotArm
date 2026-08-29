@@ -41,10 +41,31 @@ def return_to_observe() -> SequenceDefinition:
 def pick_piece(vacuum_build_ms: int = 700) -> SequenceDefinition:
     sequence = SequenceDefinition(
         name="PICK_PIECE",
-        display_name="取料",
+        display_name="取料并回观察位悬停",
+        steps=(
+            ActionStep("SOURCE_TOUCH_IDLE"),
+            ActionStep("SOURCE_TOUCH_HOLD"),
+            WaitStep("VACUUM BUILD", int(vacuum_build_ms)),
+            ActionStep("OBSERVE_HOLD"),
+        ),
+    )
+    validate_safe_sequence(sequence)
+    return sequence
+
+
+def retry_pick_piece(vacuum_build_ms: int = 700) -> SequenceDefinition:
+    """Retry a failed pickup from the shared OBSERVE/PICK_ABOVE pose.
+
+    The previous attempt ends in OBSERVE_HOLD.  Returning to OBSERVE_IDLE first
+    turns the pump off without changing the calibrated spatial pose, then the
+    normal PICK_DOWN contact and lift are repeated.
+    """
+    sequence = SequenceDefinition(
+        name="PICK_PIECE",
+        display_name="取料失败重试并回观察位悬停",
         steps=(
             ActionStep("OBSERVE_IDLE"),
-            ActionStep("OBSERVE_IDLE"),
+            ActionStep("SOURCE_TOUCH_IDLE"),
             ActionStep("SOURCE_TOUCH_HOLD"),
             WaitStep("VACUUM BUILD", int(vacuum_build_ms)),
             ActionStep("OBSERVE_HOLD"),
@@ -138,6 +159,17 @@ def validate_safe_sequence(sequence: SequenceDefinition) -> None:
             )
         if prefix.index("CARRY_HIGH_P77_HOLD") > prefix.index("P77_ABOVE_HOLD"):
             raise ValueError(f"{sequence.name}: carry-high must precede P77-above")
+
+    if "SOURCE_TOUCH_HOLD" in names:
+        hold_index = names.index("SOURCE_TOUCH_HOLD")
+        if hold_index == 0 or names[hold_index - 1] != "SOURCE_TOUCH_IDLE":
+            raise ValueError(
+                f"{sequence.name}: source touch with vacuum requires SOURCE_TOUCH_IDLE first"
+            )
+        if "OBSERVE_HOLD" not in names[hold_index + 1 :]:
+            raise ValueError(
+                f"{sequence.name}: pick must finish at OBSERVE_HOLD"
+            )
 
     if "P77_TOUCH_RELEASE" in names:
         release_index = names.index("P77_TOUCH_RELEASE")

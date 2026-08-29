@@ -1,0 +1,127 @@
+{
+  "schema_version": 1,
+  "product": "J1 Gomoku Lite P77 Manual MoveL Tuner",
+  "point_id": "P77",
+  "board": [
+    7,
+    7
+  ],
+  "created_at": "2026-08-28T00:00:00+08:00",
+  "updated_at": "2026-08-28T19:30:29+08:00",
+  "golden_above_pwm": {
+    "J0": 1500,
+    "J1": 1230,
+    "J2": 870,
+    "J3": 1230,
+    "J4": 1500
+  },
+  "steps": [
+    {
+      "step_index": 0,
+      "final_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "hardware_verified": false,
+      "operator_confirmed": true,
+      "confirmed_at": "2026-08-28T18:33:35+08:00",
+      "auto_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "correction_pwm": {
+        "J0": 0,
+        "J1": 0,
+        "J2": 0,
+        "J3": 0,
+        "J4": 0
+      }
+    },
+    {
+      "step_index": 1,
+      "auto_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "correction_pwm": {
+        "J0": 0,
+        "J1": 0,
+        "J2": 0,
+        "J3": 0,
+        "J4": 0
+      },
+      "final_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "hardware_verified": false,
+      "operator_confirmed": false
+    },
+    {
+      "step_index": 2,
+      "final_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "hardware_verified": false,
+      "operator_confirmed": true,
+      "confirmed_at": "2026-08-28T19:21:14+08:00",
+      "auto_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "correction_pwm": {
+        "J0": 0,
+        "J1": 0,
+        "J2": 0,
+        "J3": 0,
+        "J4": 0
+      }
+    },
+    {
+      "step_index": 3,
+      "final_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "hardware_verified": false,
+      "operator_confirmed": false,
+      "auto_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "correction_pwm": {
+        "J0": 0,
+        "J1": 0,
+        "J2": 0,
+        "J3": 0,
+        "J4": 0
+      }
+    }
+  ],
+  "drop_candidate": null
+}

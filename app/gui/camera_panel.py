@@ -15,7 +15,7 @@ class CameraPanel(QWidget):
         self._image_width = 0
         self._image_height = 0
 
-        title = QLabel("实时视觉 / 阶段五交点选择")
+        title = QLabel("实时视觉 / 标定目标")
         title.setStyleSheet("font-size: 17px; font-weight: 600;")
         self.camera_state = QLabel("Camera: DISCONNECTED")
         self.fps_label = QLabel("FPS: 0.0")

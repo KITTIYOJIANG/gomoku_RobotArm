@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "calibration_session_id": "2026-08-26_175518_quick_5",
+  "baseline": {
+    "path": "D:\\Projects\\Embodied\\RobotArms\\J1_Gomoku_Integrated\\calibration\\stage5_board_calibration.json",
+    "sha256": "21B4994D75E03ACCAF8D95B85A9577A9A41940370D2CE3C82F1F87AEB2EE8052",
+    "board_size": 15,
+    "resolved_point_count": 225,
+    "direct_anchor_count": 30
+  },
+  "mode": "QUICK_5",
+  "anchors": {
+    "P112": {
+      "point_id": "P112",
+      "board_row": 7,
+      "board_col": 7,
+      "baseline_pwm": {
+        "000": 1560,
+        "001": 1170,
+        "002": 990,
+        "003": 1170,
+        "004": 1500
+      },
+      "new_pwm": {
+        "000": 1500,
+        "001": 1170,
+        "002": 990,
+        "003": 1170,
+        "004": 1500
+      },
+      "delta_pwm": {
+        "000": -60,
+        "001": 0,
+        "002": 0,
+        "003": 0,
+        "004": 0
+      },
+      "source": "DIRECT",
+      "timestamp": "2026-08-26T17:55:35+08:00",
+      "calibration_session_id": "2026-08-26_175518_quick_5",
+      "clamped": false,
+      "clamp_log": {}
+    }
+  },
+  "generated_points": {},
+  "verified_points": [],
+  "candidate_revision": 0,
+  "candidate_stale": true,
+  "committed_at": null,
+  "created_at": "2026-08-26T17:55:18+08:00",
+  "updated_at": "2026-08-26T17:55:35+08:00",
+  "history": [
+    {
+      "timestamp": "2026-08-26T17:55:18+08:00",
+      "event": "SESSION_CREATED",
+      "mode": "QUICK_5"
+    },
+    {
+      "timestamp": "2026-08-26T17:55:35+08:00",
+      "event": "ANCHOR_SAVED",
+      "point_id": "P112",
+      "previous_new_pwm": null,
+      "new_pwm": {
+        "000": 1500,
+        "001": 1170,
+        "002": 990,
+        "003": 1170,
+        "004": 1500
+      },
+      "clamp_log": {}
+    }
+  ]
+}

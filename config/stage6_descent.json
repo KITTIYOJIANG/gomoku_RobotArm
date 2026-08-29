@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "force_dry_run": true,
+  "board_size": 15,
+  "above_calibration_path": "calibration/stage5_board_calibration.json",
+  "descent_calibration_path": "calibration/stage6_descent_calibration.json",
+  "kinematics_path": "config/arm_kinematics.json",
+  "motion": {
+    "move_time_ms": 1000,
+    "release_dwell_ms": 700,
+    "pump_hold_pwm": 2500,
+    "pump_off_pwm": 1500,
+    "unused_pwm": 1500,
+    "max_layer_joint_delta_pwm": 400
+  },
+  "model_validation": {
+    "max_neighbor_position_jump_mm": 80.0,
+    "max_neighbor_z_jump_mm": 45.0,
+    "max_neighbor_alpha_jump_deg": 35.0
+  },
+  "thermal": {
+    "max_above_dwell_seconds": 20.0,
+    "max_touch_dwell_seconds": 5.0,
+    "max_tweaks_per_session": 20,
+    "max_continuous_actions": 25
+  }
+}

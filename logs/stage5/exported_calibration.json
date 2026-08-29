@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "board_size": 15,
+  "coordinate_system": {
+    "row_0": "top",
+    "col_0": "left"
+  },
+  "joint_ids": [
+    "000",
+    "001",
+    "002",
+    "003",
+    "004"
+  ],
+  "pump_joint_id": "005",
+  "anchor_rows": [
+    3,
+    7,
+    11
+  ],
+  "anchor_cols": [
+    3,
+    7,
+    11
+  ],
+  "anchors": {
+    "7,7": {
+      "row": 7,
+      "col": 7,
+      "pose_type": "TARGET_ABOVE",
+      "pwm": {
+        "000": 1560,
+        "001": 1170,
+        "002": 990,
+        "003": 1170,
+        "004": 1500
+      },
+      "time_ms": 1000,
+      "calibrated": true,
+      "verified_runs": 1,
+      "notes": "Imported from stable action library P77_ABOVE_IDLE"
+    }
+  },
+  "limits": {},
+  "metadata": {
+    "created_at": "2026-07-22T15:27:10",
+    "updated_at": "2026-07-22T15:27:10",
+    "camera_setup": "",
+    "board_setup": ""
+  }
+}

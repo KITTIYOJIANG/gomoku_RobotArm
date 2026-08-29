@@ -17,6 +17,7 @@ except ImportError:  # pragma: no cover - deployment diagnostic
 LOGGER = logging.getLogger(__name__)
 EMERGENCY_STOP_COMMAND = "$DST!"
 PUMP_OFF_COMMAND = "#005P1500T0500!"
+PUMP_ON_COMMAND = "#005P2500T0500!"
 
 
 def available_serial_ports(default: str = "COM6") -> list[str]:
@@ -105,6 +106,64 @@ class SerialArmController:
 
     def pump_off(self) -> None:
         self.write(PUMP_OFF_COMMAND, label="PUMP_OFF")
+
+    def pump_on(self) -> None:
+        self.write(PUMP_ON_COMMAND, label="PUMP_ON")
+
+    def send_joint_pwm(self, joint_id: int, pwm: int, *, time_ms: int = 200) -> str:
+        """Send one spatial-joint target without touching the pump or other axes.
+
+        Stage 7 applies its narrower teaching envelope before this protocol-level
+        guard.  Keeping IDs 005..007 unavailable here prevents a live calibration
+        jog from changing the pump or unused outputs by mistake.
+        """
+        jid = int(joint_id)
+        value = int(pwm)
+        duration = int(time_ms)
+        if jid not in range(5):
+            raise ValueError("live joint PWM only permits spatial joints 000..004")
+        if not 500 <= value <= 2500:
+            raise ValueError("joint PWM outside protocol range 500..2500")
+        if not 100 <= duration <= 9999:
+            raise ValueError("joint movement time outside protocol range 100..9999ms")
+        command = f"#{jid:03d}P{value:04d}T{duration:04d}!"
+        self.write(command, label=f"LIVE_JOG_{jid:03d}")
+        return command
+
+    def send_spatial_pose(
+        self,
+        pwm: dict[int | str, int],
+        *,
+        time_ms: int = 1000,
+    ) -> str:
+        """Send J0..J4 as one atomic coarse-position target.
+
+        The command intentionally omits IDs 005..007, so applying an editor pose
+        cannot switch the pump or disturb reserved outputs.
+        """
+        duration = int(time_ms)
+        if not 100 <= duration <= 9999:
+            raise ValueError("joint movement time outside protocol range 100..9999ms")
+        targets: list[int] = []
+        for jid in range(5):
+            key = f"{jid:03d}"
+            if key in pwm:
+                raw = pwm[key]
+            elif jid in pwm:
+                raw = pwm[jid]
+            else:
+                raise ValueError(f"spatial pose is missing joint {key}")
+            value = int(raw)
+            if not 500 <= value <= 2500:
+                raise ValueError(f"joint {key} PWM outside protocol range 500..2500")
+            targets.append(value)
+        body = "".join(
+            f"#{jid:03d}P{value:04d}T{duration:04d}!"
+            for jid, value in enumerate(targets)
+        )
+        command = "{" + body + "}"
+        self.write(command, label="APPLY_SPATIAL_POSE")
+        return command
 
     def beep(self, times: int = 1, duration_ms: int = 100) -> list[str]:
         """Best-effort arm buzzer via multiple protocol candidates.

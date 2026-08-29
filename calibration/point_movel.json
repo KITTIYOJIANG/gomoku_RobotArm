@@ -1,0 +1,94 @@
+{
+  "schema_version": 1,
+  "product": "J1 Gomoku Point MoveL Calibration",
+  "updated_at": "2026-08-29T18:54:35+08:00",
+  "points": {
+    "P07_07": {
+      "point_id": "P07_07",
+      "board": [
+        7,
+        7
+      ],
+      "above_pwm": {
+        "J0": 1500,
+        "J1": 1230,
+        "J2": 870,
+        "J3": 1230,
+        "J4": 1500
+      },
+      "drop_pwm": {
+        "J0": 1500,
+        "J1": 1090,
+        "J2": 790,
+        "J3": 1370,
+        "J4": 1500
+      },
+      "delta_pwm": {
+        "J0": 0,
+        "J1": -140,
+        "J2": -80,
+        "J3": 140,
+        "J4": 0
+      },
+      "operator_confirmed": true,
+      "hardware_verified": true,
+      "saved_at": "2026-08-29T17:35:40+08:00"
+    },
+    "P03_03": {
+      "point_id": "P03_03",
+      "board": [
+        3,
+        3
+      ],
+      "above_pwm": {
+        "J0": 1589,
+        "J1": 1136,
+        "J2": 1101,
+        "J3": 1084,
+        "J4": 1500
+      },
+      "drop_pwm": {
+        "J0": 1539,
+        "J1": 1026,
+        "J2": 1081,
+        "J3": 1224,
+        "J4": 1500
+      },
+      "delta_pwm": {
+        "J0": -50,
+        "J1": -110,
+        "J2": -20,
+        "J3": 140,
+        "J4": 0
+      },
+      "operator_confirmed": true,
+      "hardware_verified": true,
+      "saved_at": "2026-08-29T18:54:33+08:00",
+      "prediction_source": "p77_delta_v1",
+      "model_prediction": {
+        "predicted_drop_pwm": {
+          "J0": 1589,
+          "J1": 996,
+          "J2": 1021,
+          "J3": 1224,
+          "J4": 1500
+        },
+        "predicted_delta_pwm": {
+          "J0": 0,
+          "J1": -140,
+          "J2": -80,
+          "J3": 140,
+          "J4": 0
+        }
+      },
+      "residual_pwm": {
+        "J0": -50,
+        "J1": 30,
+        "J2": 60,
+        "J3": 0,
+        "J4": 0
+      },
+      "confirmed_at": "2026-08-29T18:54:35+08:00"
+    }
+  }
+}
