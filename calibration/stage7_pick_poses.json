@@ -1,0 +1,65 @@
+{
+  "schema_version": 1,
+  "status": "OFFLINE / NOT HARDWARE VERIFIED",
+  "stable_action_table_unchanged": true,
+  "poses": {
+    "PICK_ABOVE": {
+      "pose_name": "PICK_ABOVE",
+      "stable_source_action": "SOURCE_TOUCH_IDLE",
+      "baseline_pwm": {
+        "000": 1810,
+        "001": 1050,
+        "002": 1000,
+        "003": 1190,
+        "004": 1500
+      },
+      "new_pwm": {
+        "000": 1618,
+        "001": 1178,
+        "002": 1092,
+        "003": 1162,
+        "004": 1500
+      },
+      "delta_pwm": {
+        "000": -192,
+        "001": 128,
+        "002": 92,
+        "003": -28,
+        "004": 0
+      },
+      "source": "DIRECT_CANDIDATE",
+      "verified": false,
+      "updated_at": "2026-08-25T12:32:27.937182+00:00",
+      "calibration_session": null
+    },
+    "PICK_DOWN": {
+      "pose_name": "PICK_DOWN",
+      "stable_source_action": "SOURCE_TOUCH_HOLD",
+      "baseline_pwm": {
+        "000": 1855,
+        "001": 1080,
+        "002": 625,
+        "003": 1480,
+        "004": 1300
+      },
+      "new_pwm": {
+        "000": 1855,
+        "001": 1080,
+        "002": 605,
+        "003": 1480,
+        "004": 1300
+      },
+      "delta_pwm": {
+        "000": 0,
+        "001": 0,
+        "002": -20,
+        "003": 0,
+        "004": 0
+      },
+      "source": "DIRECT_CANDIDATE",
+      "verified": false,
+      "updated_at": "2026-08-29T10:13:00.706315+00:00",
+      "calibration_session": "2026-08-29_180805_quick_5"
+    }
+  }
+}

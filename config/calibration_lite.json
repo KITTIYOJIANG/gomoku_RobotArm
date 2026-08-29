@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "robot_tag_ids": [10, 11, 12, 13],
+  "board_tag_ids": [15, 16, 17, 18],
+  "robot_reference_enabled": false,
+  "default_anchor_mode": "QUICK_5",
+  "normal_motion_time_ms": 1000,
+  "drop_v1": {
+    "profile_path": "calibration/calibration_lite_drop_v1.json",
+    "kinematics_path": "config/arm_kinematics.json",
+    "target_descent_mm": 25.0,
+    "waypoint_step_mm": 5.0,
+    "max_waypoint_joint_delta_pwm": 400,
+    "move_time_ms": 1000,
+    "vacuum_build_ms": 700,
+    "release_ms": 700,
+    "auto_hardware_batch": false
+  }
+}

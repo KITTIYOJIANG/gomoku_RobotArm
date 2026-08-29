@@ -22,6 +22,19 @@ def test_unknown_cannot_pick_and_observe_idle_can_pick():
     assert machine.state == ArmState.OBSERVE_HOLD
 
 
+def test_failed_pick_can_be_retried_repeatedly_from_observe_hold():
+    machine = connected_unknown_machine()
+    machine.begin_return_to_observe()
+    machine.complete_return_to_observe()
+    machine.begin_pick()
+    machine.complete_pick()
+    for _ in range(3):
+        machine.begin_pick_retry()
+        assert machine.state == ArmState.PICKING
+        machine.complete_pick()
+        assert machine.state == ArmState.OBSERVE_HOLD
+
+
 def test_only_observe_hold_with_board_lock_can_place():
     machine = connected_unknown_machine()
     machine.begin_return_to_observe()
@@ -52,7 +65,11 @@ def test_estop_is_latched_and_never_restores_pick_permission_directly():
     assert not machine.can_pick()
     with pytest.raises(InvalidTransition):
         machine.connect()
-    # Recovery requires an explicit user-commanded motion, not a state reset.
+    with pytest.raises(InvalidTransition, match="Recover from ESTOP"):
+        machine.begin_return_to_observe()
+    machine.recover_from_estop()
+    assert machine.state == ArmState.UNKNOWN
+    # Recovery still requires an explicit user-commanded move to OBSERVE_IDLE.
     machine.begin_return_to_observe()
     assert machine.state == ArmState.MOVING_TO_OBSERVE
     assert not machine.can_pick()

@@ -1,5 +1,11 @@
 from app.arm.actions import ActionLibrary
-from app.arm.sequences import pick_piece, place_to_p77, run_full_cycle, validate_safe_sequence
+from app.arm.sequences import (
+    pick_piece,
+    place_to_p77,
+    retry_pick_piece,
+    run_full_cycle,
+    validate_safe_sequence,
+)
 
 
 def test_pick_sequence_never_drops_vacuum_after_hold():
@@ -8,6 +14,37 @@ def test_pick_sequence_never_drops_vacuum_after_hold():
     assert names == ("SOURCE_TOUCH_IDLE", "SOURCE_TOUCH_HOLD", "OBSERVE_HOLD")
     hold_index = names.index("SOURCE_TOUCH_HOLD")
     assert all(library.get(name).target(5).pwm == 2500 for name in names[hold_index:])
+
+
+def test_pick_sequence_rejects_skipping_the_safe_source_approach():
+    from app.arm.sequences import ActionStep, SequenceDefinition
+
+    unsafe = SequenceDefinition(
+        name="UNSAFE_PICK",
+        display_name="unsafe",
+        steps=(ActionStep("SOURCE_TOUCH_HOLD"), ActionStep("OBSERVE_HOLD")),
+    )
+    try:
+        validate_safe_sequence(unsafe)
+    except ValueError as exc:
+        assert "SOURCE_TOUCH_IDLE" in str(exc)
+    else:
+        raise AssertionError("unsafe pick sequence was accepted")
+
+
+def test_pick_retry_turns_pump_off_at_shared_above_before_descending():
+    library = ActionLibrary()
+    names = retry_pick_piece().action_names
+    assert names == (
+        "OBSERVE_IDLE",
+        "SOURCE_TOUCH_IDLE",
+        "SOURCE_TOUCH_HOLD",
+        "OBSERVE_HOLD",
+    )
+    assert library.get(names[0]).target(5).pwm == 1500
+    assert library.get(names[1]).target(5).pwm == 1500
+    assert library.get(names[2]).target(5).pwm == 2500
+    assert library.get(names[3]).target(5).pwm == 2500
 
 
 def test_place_sequence_enforces_safe_p77_approach_and_exit():

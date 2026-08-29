@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "point_name": "P77",
+  "board_row": 7,
+  "board_col": 7,
+  "source": "operator_confirmed_new_pwm_only",
+  "updated_at": "2026-08-29T18:09:29+08:00",
+  "stable_action_table_unchanged": true,
+  "new_pwm": {
+    "000": 1500,
+    "001": 1280,
+    "002": 870,
+    "003": 1230,
+    "004": 1500
+  }
+}

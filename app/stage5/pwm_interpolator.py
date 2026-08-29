@@ -42,6 +42,38 @@ class InterpolationResult:
         }
 
 
+def bilinear_interpolate_values(
+    q11: Mapping[int | str, int | float],
+    q12: Mapping[int | str, int | float],
+    q21: Mapping[int | str, int | float],
+    q22: Mapping[int | str, int | float],
+    u: float,
+    v: float,
+) -> dict[int | str, float]:
+    """Interpolate a numeric field without attaching pose semantics.
+
+    Stage 5 uses this for absolute ABOVE PWM.  Stage 7 deliberately reuses the
+    same primitive for per-joint delta PWM so the stable baseline remains the
+    nonlinear part of the solution.
+    """
+    keys = tuple(q11)
+    if not keys or any(set(values) != set(keys) for values in (q12, q21, q22)):
+        raise ValueError("bilinear corners must expose the same non-empty keys")
+    x = float(u)
+    y = float(v)
+    if not 0.0 <= x <= 1.0 or not 0.0 <= y <= 1.0:
+        raise ValueError("bilinear coordinates u and v must be inside 0..1")
+    return {
+        key: (
+            (1.0 - x) * (1.0 - y) * float(q11[key])
+            + x * (1.0 - y) * float(q12[key])
+            + (1.0 - x) * y * float(q21[key])
+            + x * y * float(q22[key])
+        )
+        for key in keys
+    }
+
+
 def interpolate_target_pwm(
     store: CalibrationStore,
     row: int,
@@ -137,15 +169,8 @@ def interpolate_target_pwm(
     q21 = corners[f"{r2},{c1}"].spatial_pwm()
     q22 = corners[f"{r2},{c2}"].spatial_pwm()
 
-    pwm: dict[int, int] = {}
-    for jid in SPATIAL_JOINT_IDS:
-        value = (
-            (1.0 - u) * (1.0 - v) * q11[jid]
-            + u * (1.0 - v) * q12[jid]
-            + (1.0 - u) * v * q21[jid]
-            + u * v * q22[jid]
-        )
-        pwm[jid] = int(round(value))
+    interpolated = bilinear_interpolate_values(q11, q12, q21, q22, u, v)
+    pwm = {jid: int(round(interpolated[jid])) for jid in SPATIAL_JOINT_IDS}
 
     if limits is not None:
         errors = validate_spatial_pwm(pwm, limits)

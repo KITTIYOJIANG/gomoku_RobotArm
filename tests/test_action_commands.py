@@ -25,8 +25,14 @@ def test_hold_idle_release_and_reserved_channel_invariants():
         pump = action.target(5).pwm
         if name.endswith("_HOLD"):
             assert pump == 2500, name
-        if name.endswith("_IDLE") or name.endswith("_RELEASE"):
+        if name.endswith("_IDLE") or (
+            name.endswith("_RELEASE") and name != "P77_TOUCH_RELEASE"
+        ):
             assert pump == 1500, name
+        if name == "P77_TOUCH_RELEASE":
+            # Legacy stable table is immutable; Calibration Lite overrides this
+            # runtime action to 1500 before live placement.
+            assert pump == 2500
         assert action.target(6).pwm == 1500, name
         assert action.target(7).pwm == 1500, name
 

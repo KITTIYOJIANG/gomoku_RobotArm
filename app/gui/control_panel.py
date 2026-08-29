@@ -20,6 +20,7 @@ from app.arm.state import ArmState
 from .log_panel import LogPanel
 from .stage5_panel import Stage5Panel
 from .stage6_panel import Stage6Panel
+from .rapid_calibration_panel import RapidCalibrationPanel
 from .cross_anchor_panel import CrossAnchorPanel
 from .hover_learning_panel import HoverLearningPanel
 from .status_panel import StatusPanel
@@ -63,6 +64,7 @@ class ControlPanel(QWidget):
     full_cycle_requested = Signal()
     manual_action_requested = Signal(str)
     estop_requested = Signal()
+    recover_requested = Signal()
     pump_off_requested = Signal()
     beep_test_requested = Signal()
     corner_overlay_options_changed = Signal(bool, bool)
@@ -82,44 +84,57 @@ class ControlPanel(QWidget):
         self.log_panel = LogPanel()
         self.stage5_panel = Stage5Panel(default_dry_run=True)
         self.stage6_panel = Stage6Panel()
+        self.rapid_calibration_panel = RapidCalibrationPanel()
         self.cross_anchor_panel = CrossAnchorPanel()
         self.hover_learning_panel = HoverLearningPanel()
 
-        content = QWidget()
-        content_layout = QVBoxLayout(content)
-        content_layout.addWidget(self.status_panel)
-        content_layout.addWidget(self._build_connection_group(default_port, default_test_pattern))
-        content_layout.addWidget(self._build_vision_debug_group())
-        content_layout.addWidget(self._build_core_group())
-        content_layout.addWidget(self.stage5_panel)
-        self._stage6_group = QGroupBox("阶段六下降标定（默认收起）")
+        # These legacy developer panels remain as internal adapters because the
+        # existing MainWindow still reads their state. They are deliberately not
+        # mounted into the user-facing GUI.
+        self.stage5_panel.setVisible(False)
+        self.cross_anchor_panel.setVisible(False)
+        self.hover_learning_panel.setVisible(False)
+        self._stage6_group = QGroupBox()
         self._stage6_group.setCheckable(True)
         self._stage6_group.setChecked(False)
-        stage6_layout = QVBoxLayout(self._stage6_group)
-        stage6_layout.addWidget(self.stage6_panel)
-        self.stage6_panel.setVisible(False)
-        self._stage6_group.toggled.connect(self.stage6_panel.setVisible)
-        content_layout.addWidget(self._stage6_group)
-        self._adv_cross = QGroupBox('高级：中心十字标定（默认收起）')
-        self._adv_cross.setCheckable(True)
-        self._adv_cross.setChecked(False)
-        lay1 = QVBoxLayout(self._adv_cross)
-        lay1.addWidget(self.cross_anchor_panel)
-        self.cross_anchor_panel.setVisible(False)
-        self._adv_cross.toggled.connect(self.cross_anchor_panel.setVisible)
-        content_layout.addWidget(self._adv_cross)
-        self._adv_learn = QGroupBox('高级：学习层影子预测（默认收起）')
-        self._adv_learn.setCheckable(True)
-        self._adv_learn.setChecked(False)
-        lay2 = QVBoxLayout(self._adv_learn)
-        lay2.addWidget(self.hover_learning_panel)
-        self.hover_learning_panel.setVisible(False)
-        self._adv_learn.toggled.connect(self.hover_learning_panel.setVisible)
-        content_layout.addWidget(self._adv_learn)
-        content_layout.addWidget(self._build_manual_group())
-        content_layout.addWidget(self._build_future_group())
+        self._stage6_group.setVisible(False)
+        QVBoxLayout(self._stage6_group).addWidget(self.stage6_panel)
+
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(8, 8, 8, 8)
+        content_layout.setSpacing(8)
+        content_layout.addWidget(self._build_connection_group(default_port, default_test_pattern))
+        content_layout.addWidget(self.rapid_calibration_panel, 1)
         content_layout.addWidget(self._build_safety_group())
-        content_layout.addWidget(self.log_panel, 1)
+
+        # Advanced now contains diagnostics only. Legacy calibration stages,
+        # learning, action lists and experimental controls are removed from view.
+        self._advanced_group = QGroupBox("Advanced >>")
+        self._advanced_group.setCheckable(True)
+        self._advanced_group.setChecked(False)
+        advanced_layout = QVBoxLayout(self._advanced_group)
+        self._advanced_content = QWidget()
+        advanced_content_layout = QVBoxLayout(self._advanced_content)
+        advanced_content_layout.setContentsMargins(0, 4, 0, 0)
+        advanced_content_layout.addWidget(self.status_panel)
+        advanced_content_layout.addWidget(self._build_vision_debug_group())
+        advanced_content_layout.addWidget(self.log_panel, 1)
+        advanced_layout.addWidget(self._advanced_content)
+        self._advanced_content.setVisible(False)
+        self._advanced_group.toggled.connect(self._advanced_content.setVisible)
+        self._advanced_group.toggled.connect(
+            lambda expanded: self._advanced_group.setTitle(
+                "Advanced <<" if expanded else "Advanced >>"
+            )
+        )
+        content_layout.addWidget(self._advanced_group)
+
+        task = self.rapid_calibration_panel
+        task.return_observe_requested.connect(self.return_observe_requested.emit)
+        task.pick_once_requested.connect(self.pick_requested.emit)
+        task.runtime_cycle_requested.connect(self.full_cycle_requested.emit)
+        task.runtime_stop_requested.connect(self.estop_requested.emit)
 
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
@@ -141,9 +156,9 @@ class ControlPanel(QWidget):
         layout = QGridLayout(group)
         self.connect_camera_button = QPushButton("连接摄像头")
         self.disconnect_camera_button = QPushButton("断开摄像头")
-        self.test_pattern_checkbox = QCheckBox("dry-run 测试画面")
+        self.test_pattern_checkbox = QCheckBox("相机测试画面（开发）")
         self.test_pattern_checkbox.setChecked(default_test_pattern)
-        self.test_pattern_checkbox.setVisible(self._dry_run)
+        self.test_pattern_checkbox.setVisible(default_test_pattern)
         self.port_combo = QComboBox()
         ports = available_serial_ports(default_port)
         self.port_combo.addItems(ports)
@@ -254,11 +269,14 @@ class ControlPanel(QWidget):
             "QPushButton:hover { background: #d3313b; }"
         )
         self.pump_off_button = QPushButton("气泵关闭")
+        self.recover_button = QPushButton("急停后恢复")
         self.pump_off_button.setMinimumHeight(54)
         layout.addWidget(self.estop_button, 2)
         layout.addWidget(self.pump_off_button, 1)
+        layout.addWidget(self.recover_button, 1)
         self.estop_button.clicked.connect(lambda _checked=False: self.estop_requested.emit())
         self.pump_off_button.clicked.connect(lambda _checked=False: self.pump_off_requested.emit())
+        self.recover_button.clicked.connect(lambda _checked=False: self.recover_requested.emit())
         return group
 
     def _toggle_manual(self, expanded: bool) -> None:
@@ -278,13 +296,16 @@ class ControlPanel(QWidget):
         )
 
     def camera_uses_test_pattern(self) -> bool:
-        return self._dry_run and self.test_pattern_checkbox.isChecked()
+        return self.test_pattern_checkbox.isChecked()
 
     def set_camera_connected(self, connected: bool) -> None:
         self.connect_camera_button.setEnabled(not connected)
         self.disconnect_camera_button.setEnabled(connected)
         self.test_pattern_checkbox.setEnabled(not connected)
         self.recognize_pieces_button.setEnabled(connected)
+        self.rapid_calibration_panel.set_runtime_status(
+            camera="READY" if connected else "NOT READY"
+        )
 
     def update_controls(
         self,
@@ -294,30 +315,26 @@ class ControlPanel(QWidget):
         busy: bool,
         board_locked: bool,
         target_visible: bool,
+        estop_latched: bool = False,
     ) -> None:
         self.port_combo.setEnabled(not connected and not busy)
         self.connect_serial_button.setEnabled(not connected and not busy)
         self.disconnect_serial_button.setEnabled(connected)
-        ordinary = connected and not busy
-        # 回观察位：串口一连上就应可点（忙时点击会提示），不必等 OBSERVE/悬停状态。
-        self.return_button.setEnabled(connected)
-        self.pick_button.setEnabled(ordinary and state == ArmState.OBSERVE_IDLE)
-        self.place_button.setEnabled(
-            ordinary
-            and state == ArmState.OBSERVE_HOLD
-            and board_locked
-            and target_visible
+        ordinary = connected and not busy and not estop_latched
+        self.rapid_calibration_panel.set_runtime_status(
+            robot=(f"CONNECTED · {state.value}" if connected else "DISCONNECTED")
         )
-        self.full_cycle_button.setEnabled(
+        self.rapid_calibration_panel.runtime_pick_button.setEnabled(
+            ordinary and state == ArmState.OBSERVE_IDLE
+        )
+        self.rapid_calibration_panel.runtime_return_button.setEnabled(ordinary)
+        self.rapid_calibration_panel.runtime_cycle_button.setEnabled(
             ordinary
             and state == ArmState.OBSERVE_IDLE
             and board_locked
             and target_visible
         )
-        self.manual_toggle.setEnabled(ordinary)
-        for button in self.manual_buttons.values():
-            button.setEnabled(ordinary)
+        self.rapid_calibration_panel.runtime_stop_button.setEnabled(connected)
         self.estop_button.setEnabled(connected)
         self.pump_off_button.setEnabled(connected)
-        if hasattr(self, "beep_test_button"):
-            self.beep_test_button.setEnabled(connected)
+        self.recover_button.setEnabled(connected and estop_latched and not busy)

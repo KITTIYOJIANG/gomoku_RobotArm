@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "model_name": "j1_factory_geometry_p77_calibrated_candidate",
-  "model_status": "CANDIDATE_NOT_PHYSICALLY_MEASURED",
+  "model_status": "PARTIALLY_MEASURED_TCP_LINK_OTHER_LINKS_CANDIDATE",
   "source": {
     "inverse_kinematics": "firmware/stm32_j1_reference/src/z_kinematics.c",
     "link_initialization": "firmware/stm32_j1_reference/USER/z_main.c:152",
@@ -11,14 +11,16 @@
       "The setup call uses 110/105/75/190 mm; its nearby comment conflicts.",
       "Joint 002 installed direction is configured opposite to the copied formula.",
       "Biases make stable P77 ABOVE and TOUCH share FK x/y and set ABOVE alpha=-55 deg.",
-      "These are candidate model parameters, not physical metrology."
+      "L3 is the user-measured 140 mm distance from the J3 pitch-axis end segment to TCP.",
+      "J4 only rotates the nozzle and is excluded from planar FK/IK.",
+      "L0/L1/L2 and fitted biases remain candidate parameters."
     ]
   },
   "links_mm": {
     "L0": 110.0,
     "L1": 105.0,
     "L2": 75.0,
-    "L3": 190.0
+    "L3": 140.0
   },
   "joints": {
     "000": {
@@ -36,7 +38,7 @@
       "zero_pwm": 1500.0,
       "direction": 1.0,
       "degrees_per_pwm": 0.135,
-      "angle_bias_deg": 35.32595960670788,
+      "angle_bias_deg": 24.218500799981825,
       "kinematic_offset_deg": 90.0,
       "pwm_min": 550,
       "pwm_max": 2450
@@ -46,7 +48,7 @@
       "zero_pwm": 1500.0,
       "direction": -1.0,
       "degrees_per_pwm": 0.135,
-      "angle_bias_deg": -14.534642111236085,
+      "angle_bias_deg": -7.744936059725429,
       "kinematic_offset_deg": 0.0,
       "pwm_min": 550,
       "pwm_max": 2450
@@ -56,13 +58,13 @@
       "zero_pwm": 1500.0,
       "direction": 1.0,
       "degrees_per_pwm": 0.135,
-      "angle_bias_deg": -36.91060171794394,
+      "angle_bias_deg": -19.013436859707234,
       "kinematic_offset_deg": 0.0,
       "pwm_min": 550,
       "pwm_max": 2450
     },
     "004": {
-      "role": "auxiliary_wrist_passthrough",
+      "role": "nozzle_rotation_passthrough",
       "participates_in_planar_kinematics": false,
       "zero_pwm": 1500.0,
       "direction": 1.0,

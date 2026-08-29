@@ -1,0 +1,158 @@
+{
+  "schema_version": 1,
+  "project": "J1 Gomoku Integrated",
+  "current_stage": "J1 Gomoku Robot Lite Calibration V1 - software milestone",
+  "status": "OFFLINE VERIFIED / HARDWARE VERIFICATION PENDING",
+  "last_stable": {
+    "branch": "main",
+    "tag": "J1_Gomoku_V0.2_Arbitrary_Hover_Stable",
+    "commit": "7a1e1253f37c9614a8e528f2d4b01e099e03474f"
+  },
+  "current_development": {
+    "branch": "stage6-full-board-descent",
+    "commit": "f8411afc6f198a05b1646bebcb8bf0e6a761708e",
+    "working_tree_clean_at_audit": false,
+    "stage7_committed": false
+  },
+  "baseline_calibration": {
+    "path": "calibration/stage5_board_calibration.json",
+    "sha256": "21B4994D75E03ACCAF8D95B85A9577A9A41940370D2CE3C82F1F87AEB2EE8052",
+    "board_size": 15,
+    "direct_anchor_count": 30,
+    "interpolated_point_count": 195,
+    "resolved_point_count": 225
+  },
+  "stable_action_table": {
+    "path": "config/arm_actions.json",
+    "sha256": "9B0A888C47DCFEC04C82A5D1C38D646334BBA46B3E2874DF630BBB142DA3FB7F",
+    "action_count": 11
+  },
+  "integrated_v1": {
+    "profile_path": "calibration/profiles/integrated_v1_current.json",
+    "golden_anchor_count": 5,
+    "golden_anchors": [
+      "P33",
+      "P311",
+      "P77",
+      "P113",
+      "P1111"
+    ],
+    "offline_batch": {
+      "requested": 225,
+      "success": 199,
+      "unreachable": 26,
+      "invalid": 0,
+      "skipped": 0,
+      "golden_started": 5
+    },
+    "full_test_suite": "214 passed in 21.07s",
+    "focused_test_suite": "47 passed in 6.56s",
+    "hardware_execution_during_milestone": false
+  },
+  "lite_calibration_v1": {
+    "profile_path": "calibration/calibration_lite_drop_v1.json",
+    "above_points": 225,
+    "golden_anchor_count": 5,
+    "j5_kinematics": false,
+    "auto_hardware_batch": false,
+    "target_descent_mm": 25.0,
+    "waypoint_step_mm": 5.0,
+    "saved_above_offline_batch": {
+      "requested": 225,
+      "success": 193,
+      "unreachable": 32,
+      "invalid": 0,
+      "skipped": 0,
+      "golden_started": 5
+    },
+    "verified_drop_points": 0,
+    "focused_test_suite": "31 passed in 6.61s (transit/Lite focused tests only)",
+    "p77_transit_dry_run": "2 passed in 2.79s; command path captured; no COM/camera/hardware",
+    "p77_manual_movel_profile": "calibration/p77_manual_movel.json",
+    "p77_manual_movel_saved_steps": 1,
+    "p77_manual_movel_drop_candidate": false,
+    "p77_manual_movel_targeted_tests": "12 passed in 4.83s; P77 full-flow, MoveL overlay, transit, power-on timing, UI and persistence focused only",
+    "p77_manual_movel_dry_run": "1 passed in 3.85s; pickup, confirmed manual descent, release, exact reverse and J1-FIRST return commands captured; no COM/camera/hardware",
+    "full_test_suite": "225 passed in 26.61s",
+    "safe_smoke": "10 checks passed",
+    "hardware_execution_during_milestone": false
+  },
+  "hardware_verified_until": "Inherited legacy pick/carry/P77 place flow and five user-confirmed Golden ABOVE anchors only; all new V1 DROP paths are NOT VERIFIED",
+  "working_features": [
+    "Fixed-P77 action/PWM baseline and guarded carry-high/ABOVE/TOUCH flow",
+    "Stage 5 ABOVE hover calibration with 30 persisted direct anchors",
+    "Manual GUI camera, board-lock, serial, arm-state and emergency-stop controls",
+    "ASCII 115200-baud host protocol with explicit user connection",
+    "Calibration Lite V1 five-step single-point DROP wizard shares the existing serial controller and worker"
+  ],
+  "offline_verified_features": [
+    "Stage 5 resolves 225 ABOVE points from 30 direct anchors plus 195 interpolated points",
+    "Stage 6 snapshots 225 ABOVE poses and stores 153 complete five-layer descent candidates",
+    "Stage 6 rejects 72 unsafe or unsolved candidates instead of clipping PWM",
+    "Stage 6 P77 five-layer descent/reverse-ascent path has DRY_RUN_PASSED status",
+    "Stage 7 calibration-first backend, slim original GUI, live guard, pick-flow and ESTOP tests pass 35 focused tests",
+    "Stage 7 operator controls use the live lower-controller path after explicit COM connection",
+    "Calibration-first GUI exposes rapid calibration, point verification and runtime while hiding development surfaces under Advanced",
+    "Hover learning model is shadow-only and cannot control live motion",
+    "Integrated V1 protects exact Golden ABOVE anchors across generation, Fast 5/9, save and reload",
+    "Integrated V1 generates 225 MoveL/DROP records offline: 199 candidates and 26 guarded unreachable points",
+    "Game sends unambiguous point_id values through RobotController.place_piece(point_id)",
+    "Profile-integrity startup routes First Setup or Game without auto-connecting camera or serial",
+    "Lite V1 protects 225 saved ABOVE records and the exact five Golden anchors without editing stable assets",
+    "Lite V1 generates Cartesian-Z waypoints with continuous seeded IK and blocks unsafe/unreachable points",
+    "Lite V1 stores automatic DROP, J0-J4 correction, final DROP and verification evidence separately",
+    "Lite V1 five-step wizard gates Move ABOVE, waypoint/full DROP, correction, Test PLACE and final verification in operator order",
+    "Lite V1 exact partial/full retract, Safe Return step recovery, collapsed advanced details, ESTOP and Dry Run are offline tested",
+    "Lite board entry uses direct J1-LAST, board exit uses direct J1-FIRST, and DROP Safe Return follows the saved reverse path to ABOVE before exit",
+    "Golden DROP calibration inserts runtime-only SAFE ABOVE at exact Golden J1 + 30 without modifying persisted Golden ABOVE or J5 pump state",
+    "P77 Manual MoveL Tuner edits positive absolute J0-J4 PWM without enforcing delta direction, inherits each new step from the previous saved final PWM, omits locked J5 during tuning, and reverses only through saved manual steps",
+    "P77 manual DROP candidate is stored independently with operator_confirmed=true and hardware_verified=false; applying it creates a P77-only MoveL correction overlay that survives profile save/load and recalculation",
+    "P77 dedicated full flow uses the calibrated pick actions, J1-held SAFE ABOVE entry, every confirmed manual descent step, pump release, exact manual reverse and the two-phase J1-FIRST Observation return",
+    "Saved Lite ABOVE source produced 193 candidates and 32 guarded unreachable points with no hardware execution",
+    "Full repository suite passes 225 tests; safe smoke passes 10 checks"
+  ],
+  "in_progress": [
+    "Human review of the Lite Calibration V1 working-tree milestone",
+    "Bounded Lite point-by-point hardware verification beginning at P77",
+    "Working-tree cleanup and milestone commit/tag after review"
+  ],
+  "known_issues": [
+    "The working tree contains existing modified and untracked Stage 7, firmware, log and temporary files",
+    "The shell PATH Python is MSYS2 Python 3.14.5 without pytest; D:/Anaconda/python.exe 3.12.7 is the locally verified environment",
+    "There is no reliable servo arrival ACK; motion completion is time-estimated",
+    "P77 coordinate naming and Stage 7 P000..P224 flat indexing must not be mixed",
+    "The copied SAFE_STAGE1 firmware protocol is not proven compatible with the deployed PWM controller",
+    "Thirty-two saved-Lite-source DROP candidates are offline unreachable and blocked from execution",
+    "The independent stable-baseline smoke source produces 199 candidates and 26 guarded unreachable points",
+    "All newly generated or corrected Lite DROP paths remain NOT VERIFIED on hardware"
+  ],
+  "current_goal": "Operator-calibrate the isolated P77 Manual MoveL path and validate its dedicated pick/place full flow",
+  "next_task": "Wait for explicit authorization, then calibrate P77 one confirmed manual step at a time, apply the selected DROP to MoveL, and run the dedicated P77 full flow",
+  "safe_defaults": {
+    "recommended_entry": "python -m app.main",
+    "auto_connect_camera": false,
+    "auto_connect_serial": false,
+    "stage5_default_dry_run": true,
+    "stage5_force_dry_run": false,
+    "stage6_force_dry_run": true,
+    "stage7_default_dry_run": false,
+    "stage7_force_dry_run": false,
+    "integrated_v1_default_dry_run": false,
+    "integrated_v1_force_dry_run": false,
+    "integrated_v1_generate_all_hardware_execution": false,
+    "lite_calibration_v1_dry_run_entry": "scripts/run_calibration_lite_dry_run.bat",
+    "lite_calibration_v1_auto_hardware_batch": false,
+    "project_wide_force_dry_run": false
+  },
+  "unknowns": [
+    "Exact camera mounting pose and orientation",
+    "Physical board and AprilTag dimensions in millimetres",
+    "Exact deployed STM32 firmware revision and compatibility",
+    "Deployed servo EEPROM bias values",
+    "Whether all 195 interpolated ABOVE points were individually observed on hardware",
+    "Which of the 193 saved-Lite-source DROP candidates are safe and accurate on the deployed robot",
+    "Which operator-tuned P77 manual step reaches the correct landing height while keeping the TCP acceptably vertical",
+    "Whether the current Lite Calibration V1 working-tree milestone is approved for the first bounded live P77 test"
+  ],
+  "last_updated": "2026-08-28"
+}

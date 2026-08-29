@@ -41,7 +41,7 @@ def test_hover_hold_keeps_pump_on(tmp_path: Path):
     store = CalibrationStore(tmp_path / "c.json", library=lib, safety_limits=limits)
     planner = HoverPlanner(lib, store, limits)
     plan = planner.plan_hover_to(7, 7, holding_piece=True, dry_run=True)
-    assert plan.sequence.action_names[0] == "CARRY_HIGH_P77_HOLD"
+    assert plan.sequence.action_names[0] == "CARRY_HIGH_LIFTED_HOLD"
     assert "#005P2500" in plan.target_action.command
 
 

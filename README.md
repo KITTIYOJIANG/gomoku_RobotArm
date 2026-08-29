@@ -2,6 +2,18 @@
 
 固定点 P77 五子棋机械臂整合开发版。左侧显示摄像头、稳定棋盘四角红点、15×15 网格和固定 P77；右侧提供连接、视觉调试、状态、安全动作、手动姿态、急停和日志。
 
+## Development
+
+Returning to the project? Start with [START_HERE.md](START_HERE.md), then run:
+
+```powershell
+python tools\project_doctor.py
+python tools\resume_project.py
+python tools\smoke_test.py
+```
+
+Maintenance references: [Architecture](docs/ARCHITECTURE.md), [Hardware Setup](docs/HARDWARE_SETUP.md), [Calibration](docs/CALIBRATION.md), and [Development Workflow](docs/DEVELOPMENT_WORKFLOW.md).
+
 ## 重要安全边界
 
 - 程序启动不会自动连接摄像头或 COM，也不会自动运动。
@@ -37,25 +49,19 @@ cd D:\Projects\Embodied\RobotArms\J1_Gomoku_Integrated
 python -m app.main
 ```
 
-dry-run + 测试画面：
+开发用相机测试画面（仍不会自动连接 COM）：
 
 ```powershell
-python -m app.main --dry-run --test-pattern
-```
-
-dry-run 但允许用户点击后打开真实摄像头：
-
-```powershell
-python -m app.main --dry-run
+python -m app.main --test-pattern
 ```
 
 批处理入口会切换到项目根目录，并在错误时保留窗口：
 
 ```powershell
-scripts\run_gui.bat --dry-run --test-pattern
+scripts\run_gui.bat
 ```
 
-实机 GUI 命令仍是 `python -m app.main`。命令本身不连接硬件；只能由用户在 GUI 中选择端口并点击连接。
+实机 GUI 命令是 `python -m app.main`。界面不再提供 DRY RUN；命令本身不连接硬件，只有用户在 GUI 中选择端口并点击连接后，动作按钮才会向下位机发送。
 
 ## 相机与 AprilTag
 
@@ -111,7 +117,7 @@ python -m compileall -q app tests
 
 ```powershell
 $env:QT_QPA_PLATFORM='offscreen'
-python -m app.main --dry-run --test-pattern --smoke-test
+python -m app.main --test-pattern --smoke-test
 ```
 
 此 smoke test 只启动生成的测试画面 worker，不打开真实摄像头，也不连接 COM。
@@ -120,8 +126,8 @@ python -m app.main --dry-run --test-pattern --smoke-test
 
 1. 不放棋盘/棋子，机械臂悬空或可靠支撑；准备物理断电，清空工作空间。
 2. 确认 COM6 控制器运行兼容 `{#...}`/`$DST!` 的既有固件，不是复制目录中的 SAFE_STAGE1 构建。
-3. 先运行 dry-run，点击模拟 COM 连接、回观察位、取料、下棋，核对日志顺序。
-4. 关闭 dry-run，启动普通 GUI；只连接相机，确认 Tag 15–18、网格方向和 P77 圆点无误。
+3. 启动普通 GUI，但暂不连接 COM；只连接相机，确认 Tag 15–18、网格方向和 P77 圆点无误。
+4. 清空机械臂工作区，确认物理断电手段可用，再准备连接下位机。
 5. 连接 COM6 后状态应为 UNKNOWN；先测试急停，确认控制器停止响应正确，再由用户恢复。
 6. 在无棋盘/无吸取负载条件下，逐个确认 HOME/OBSERVE/CARRY_HIGH_P77/P77_ABOVE 姿态；核对日志中的 000=1560，不要先测试 P77_TOUCH。
 7. 放置棋盘后，低风险验证 `OBSERVE_HOLD -> CARRY_HIGH_P77_HOLD -> P77_ABOVE_HOLD` 的净空，并确认 ABOVE 到 TOUCH 期间底座不横向旋转。
@@ -130,7 +136,15 @@ python -m app.main --dry-run --test-pattern --smoke-test
 
 ## 尚未实现
 
-任意棋盘坐标 PWM、自动落子、五子棋 AI、相机-机械臂外参标定、新固定点保存、吸取成功检测/重试、蜂鸣器测试和多目标动作库。GUI 明确显示为禁用的“后续版本”。
+Stage 7 已增加独立的 Rapid Calibration 页面：以 Stage 5 的 225 点 ABOVE
+解析结果为只读 baseline，用 QUICK 5 / STANDARD 9 direct anchor 的 ΔPWM 双线性
+correction field 生成 deployment candidate，并支持局部 direct anchor、验证、commit
+和 rollback。Stage 7 的可见控制在显式连接 COM 后直接走下位机；只调整空间关节 `000..004`，`005` 气泵锁定。
+
+Stage 7 committed deployment 尚未自动替换普通 Stage 5 点击悬停和 Stage 6 descent
+的 ABOVE source。仍未实现相机-机械臂自动外参标定、自动落子、五子棋 AI、吸取
+成功检测/重试和视觉闭环 correction。详细边界、测试和实机步骤见
+`docs/STAGE7_OFFLINE_DELIVERY_REPORT.md`。
 
 ## 原工程与追溯
 

@@ -46,7 +46,7 @@ def test_stage6_p77_calibration_has_vertical_xy_and_measured_drop() -> None:
     touch = kin.forward_kinematics(spatial("P77_TOUCH_HOLD"))
     assert touch.x == pytest.approx(above.x, abs=1e-9)
     assert touch.y == pytest.approx(above.y, abs=1e-9)
-    assert touch.z - above.z == pytest.approx(-50.0634310305, abs=1e-6)
+    assert touch.z - above.z == pytest.approx(-51.3028747911, abs=1e-6)
     assert touch.alpha - above.alpha == pytest.approx(-12.15, abs=1e-6)
 
 

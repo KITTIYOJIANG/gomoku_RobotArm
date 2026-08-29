@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "profile_path": "calibration/profiles/integrated_v1_current.json",
+  "baseline_path": "calibration/stage5_board_calibration.json",
+  "kinematics_path": "config/arm_kinematics.json",
+  "default_dry_run": false,
+  "force_dry_run": false,
+  "motion": {
+    "target_descent_mm": 25.0,
+    "waypoint_step_mm": 5.0,
+    "max_waypoint_joint_delta_pwm": 400,
+    "move_time_ms": 1000,
+    "release_ms": 700
+  },
+  "safety": {
+    "generate_all_hardware_execution": false,
+    "require_verified_drop_for_live_game": true,
+    "require_explicit_live_confirmation": true,
+    "protect_golden_above": true
+  }
+}

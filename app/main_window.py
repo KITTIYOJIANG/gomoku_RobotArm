@@ -46,9 +46,22 @@ from app.stage6.planner import (
     Stage6PlanningError,
 )
 from app.stage6.state_machine import Stage6MotionState
+from app.stage7 import CalibrationMode, RapidCalibrationCoordinator, point_id
+from app.integrated_v1.golden import FAST_9, GOLDEN_ABOVE, GOLDEN_FAST_5, golden_for
+from app.integrated_v1.movel import MoveLPlanner
+from app.integrated_v1.points import parse_point_id
+from app.integrated_v1.profile import CalibrationProfileManager, ProfileError
+from app.integrated_v1.robot_controller import (
+    RobotController,
+    RobotExecutionBlocked,
+    RobotState,
+)
+from app.integrated_v1.settings import IntegratedV1Settings
+from app.stage6.kinematics import ArmKinematics, KinematicsConfig
 from app.gui.camera_panel import CameraPanel
 from app.gui.control_panel import ControlPanel
 from app.logging_config import LogEmitter, QtLogHandler
+from app.robot_api import IntegratedRobotInterface, SUCCESS
 from app.vision.camera_worker import CameraWorker
 
 
@@ -110,6 +123,68 @@ class MainWindow(QMainWindow):
             controller=self.controller,
             library=self.actions,
         )
+        self.stage7 = RapidCalibrationCoordinator(
+            controller=self.controller,
+            library=self.actions,
+        )
+        self.v1_settings = IntegratedV1Settings.load()
+        self.v1_profile = CalibrationProfileManager(
+            profile_path=self.v1_settings.profile_path,
+            baseline_path=self.v1_settings.baseline_path,
+            library=self.actions,
+        )
+        self._v1_profile_load_error: str | None = None
+        try:
+            self.v1_profile.load_or_create()
+        except ProfileError as exc:
+            # Preserve a malformed/incompatible file for inspection. Work from a
+            # fresh in-memory candidate and only write after an explicit Save.
+            self._v1_profile_load_error = str(exc)
+            self.v1_profile.create_from_stable_baseline()
+            LOGGER.error("[V1][PROFILE_LOAD_FAILED] %s", exc)
+        self.v1_movel = MoveLPlanner(
+            self.v1_profile,
+            kinematics=ArmKinematics(
+                KinematicsConfig.load(self.v1_settings.kinematics_path)
+            ),
+            target_descent_mm=self.v1_settings.target_descent_mm,
+            step_mm=self.v1_settings.waypoint_step_mm,
+            max_waypoint_joint_delta_pwm=self.v1_settings.max_waypoint_joint_delta_pwm,
+        )
+        self.robot = RobotController(
+            serial_controller=self.controller,
+            action_library=self.actions,
+            profile=self.v1_profile,
+            planner=self.v1_movel,
+            worker=self.arm_worker,
+            dry_run=self.dry_run,
+            move_time_ms=self.v1_settings.move_time_ms,
+            vacuum_build_ms=config.timing.vacuum_build_ms,
+            release_ms=self.v1_settings.release_ms,
+        )
+        self.robot_api = IntegratedRobotInterface(
+            controller=self.controller,
+            robot=self.robot,
+            calibration_ready=lambda: self.v1_profile.status().valid,
+            default_port=config.serial.default_port,
+            connect_action=self.connect_serial,
+            disconnect_action=self.disconnect_serial,
+            move_above_action=self.v1_move_above,
+            home_action=self.start_return_to_observe,
+            stop_action=self.emergency_stop,
+        )
+        self._v1_live_tested_points: set[str] = set()
+        self._v1_live_drop_pending_retract: set[str] = set()
+        self._v1_fast_anchor_inputs: dict[str, dict[tuple[int, int], dict[str, int]]] = {
+            "FAST_5": {},
+            "FAST_9": {},
+        }
+        self._stage7_active_move_point: tuple[int, int] | None = None
+        self._stage7_active_move_pwm: dict[str, int] | None = None
+        self._stage7_parked_above: tuple[int, int] | None = None
+        self._stage7_parked_pwm: dict[str, int] | None = None
+        self._stage7_live_tested_points: set[tuple[int, int]] = set()
+        self._stage7_preview_token = 0
         self._selected_target_freeze = False
         draft_path = getattr(config.stage5, "cross_draft_path", None) or (config.logs_dir.parent / "calibration" / "stage5_cross_anchor_drafts.json")
         sample_path = getattr(config.stage5, "hover_samples_path", None) or (config.logs_dir.parent / "datasets" / "hover_pose" / "verified_samples.jsonl")
@@ -148,14 +223,14 @@ class MainWindow(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.addWidget(self.camera_panel)
         splitter.addWidget(self.control_panel)
-        splitter.setStretchFactor(0, 65)
-        splitter.setStretchFactor(1, 35)
-        splitter.setSizes([1100, 590])
+        splitter.setStretchFactor(0, 60)
+        splitter.setStretchFactor(1, 40)
+        splitter.setSizes([1000, 680])
         root = QWidget()
         layout = QHBoxLayout(root)
         layout.addWidget(splitter)
         self.setCentralWidget(root)
-        self.setWindowTitle("J1 五子棋机械臂整合开发版 V0.1" + (" — DRY RUN" if self.dry_run else ""))
+        self.setWindowTitle("J1 Gomoku Robot Integrated V1" + (" — DRY RUN" if self.dry_run else ""))
         self.resize(1680, 980)
 
         self.log_emitter = LogEmitter(self)
@@ -163,12 +238,23 @@ class MainWindow(QMainWindow):
         logging.getLogger().addHandler(self.log_handler)
         self.log_emitter.message.connect(self.control_panel.log_panel.append_message)
 
+        stage7_panel = self.control_panel.rapid_calibration_panel
+
         self._connect_signals()
+        # Seed the editor from the immutable baseline. Subsequent UI refreshes do
+        # not overwrite unsaved user edits.
+        self.stage7_select_point(*stage7_panel.current_point)
+        self._refresh_v1_ui()
+        self._route_v1_startup()
         self._stage6_last_dwell_warning: str | None = None
         self.stage6_thermal_timer = QTimer(self)
         self.stage6_thermal_timer.setInterval(500)
         self.stage6_thermal_timer.timeout.connect(self._poll_stage6_thermal)
         self.stage6_thermal_timer.start()
+        self.stage7_jog_timer = QTimer(self)
+        self.stage7_jog_timer.setInterval(self.stage7.settings.live_jog_interval_ms)
+        self.stage7_jog_timer.timeout.connect(self._flush_stage7_jog)
+        self.stage7_jog_timer.start()
         self.arm_worker.start()
         # Stage5 is created after controller; immediately pull current main context
         # so late construction never misses an already-connected COM/board/arm state.
@@ -188,6 +274,7 @@ class MainWindow(QMainWindow):
         panel.full_cycle_requested.connect(self.start_full_cycle)
         panel.manual_action_requested.connect(self.start_manual)
         panel.estop_requested.connect(self.emergency_stop)
+        panel.recover_requested.connect(self.stage5_recover)
         panel.pump_off_requested.connect(self.pump_off)
         panel.beep_test_requested.connect(self.test_beep)
         panel.corner_overlay_options_changed.connect(self.set_corner_overlay_options)
@@ -239,6 +326,47 @@ class MainWindow(QMainWindow):
         s6.level_combo.currentIndexChanged.connect(
             lambda _index: self._refresh_stage6_panel()
         )
+        s7 = panel.rapid_calibration_panel
+        s7.load_baseline_requested.connect(self.stage7_load_baseline)
+        s7.new_session_requested.connect(self.stage7_new_session)
+        s7.point_selected.connect(self.stage7_select_point)
+        s7.move_above_requested.connect(self.stage7_move_above)
+        s7.jog_requested.connect(self.stage7_jog)
+        s7.apply_joint_requested.connect(self.stage7_apply_joint)
+        s7.apply_all_requested.connect(self.stage7_apply_all)
+        s7.save_anchor_requested.connect(self.stage7_save_anchor)
+        s7.recalculate_requested.connect(self.stage7_recalculate)
+        s7.verify_requested.connect(self.stage7_verify)
+        s7.commit_requested.connect(self.stage7_commit)
+        s7.rollback_requested.connect(self.stage7_rollback)
+        s7.pick_pose_selected.connect(self.stage7_select_pick_pose)
+        s7.save_pick_pose_requested.connect(self.stage7_save_pick_pose)
+        s7.move_pick_above_requested.connect(
+            lambda: self.start_manual("SOURCE_TOUCH_IDLE")
+        )
+        drop = s7.drop_calibration_panel
+        drop.point_selected.connect(self.v1_select_point)
+        drop.generate_point_requested.connect(self.v1_generate_drop)
+        drop.generate_all_requested.connect(self.v1_generate_all_drop)
+        drop.move_above_requested.connect(self.v1_move_above)
+        drop.preview_requested.connect(self.v1_preview_movel)
+        drop.move_drop_requested.connect(self.v1_move_drop)
+        drop.retract_requested.connect(self.v1_retract)
+        drop.full_place_requested.connect(self.v1_test_full_place)
+        drop.save_correction_requested.connect(self.v1_save_drop_correction)
+        drop.reset_correction_requested.connect(self.v1_reset_drop_correction)
+        drop.verify_requested.connect(self.v1_mark_drop_verified)
+        drop.save_profile_requested.connect(self.v1_save_profile)
+        drop.promote_profile_requested.connect(self.v1_promote_profile)
+        drop.export_golden_baseline_requested.connect(self.v1_export_golden_baseline)
+        drop.fast_anchor_saved.connect(self.v1_capture_fast_anchor)
+        drop.fast_apply_requested.connect(self.v1_apply_fast_calibration)
+        drop.direct_anchor_requested.connect(self.v1_save_direct_anchor)
+        drop.fast_mode.currentIndexChanged.connect(lambda _index: self._refresh_v1_ui())
+        drop.emergency_stop_requested.connect(self.emergency_stop)
+        game = s7.game_panel
+        game.robot_place_requested.connect(self.v1_game_place)
+        game.emergency_stop_requested.connect(self.emergency_stop)
         self._connect_cross_anchor_signals()
         self._connect_learning_signals()
 
@@ -250,6 +378,389 @@ class MainWindow(QMainWindow):
             self._refresh_star_status()
         except Exception:
             pass
+
+    def _route_v1_startup(self) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        status = self.v1_profile.status()
+        if status.valid:
+            panel.show_game()
+            LOGGER.info("[V1][STARTUP_ROUTE] GAME profile=%s", self.v1_profile.profile_path)
+        else:
+            panel.show_first_setup()
+            LOGGER.info(
+                "[V1][STARTUP_ROUTE] FIRST_SETUP reasons=%s",
+                "; ".join(status.reasons),
+            )
+
+    def _refresh_v1_ui(self) -> None:
+        if not hasattr(self, "control_panel"):
+            return
+        task = self.control_panel.rapid_calibration_panel
+        drop_panel = task.drop_calibration_panel
+        game_panel = task.game_panel
+        data = self.v1_profile._require_data()
+        drops = data["drop"]["points"]
+        statuses = {
+            key: str(record.get("status", "NOT_GENERATED"))
+            for key, record in drops.items()
+        }
+        golden_ids = {
+            parse_point_id(coord).point_id for coord in GOLDEN_ABOVE
+        }
+        drop_panel.set_statuses(statuses, golden_ids=golden_ids)
+        drop_panel.set_statistics(self.v1_profile.statistics())
+        mode = str(drop_panel.fast_mode.currentData())
+        required = len(GOLDEN_FAST_5 if mode == "FAST_5" else FAST_9)
+        drop_panel.set_fast_progress(
+            len(self._v1_fast_anchor_inputs.get(mode, {})), required
+        )
+        try:
+            point = drop_panel.current_point_id
+            drop_panel.set_point_data(
+                self.v1_profile.above_record(point), self.v1_profile.drop_record(point)
+            )
+        except Exception as exc:
+            LOGGER.error("[V1][DROP_UI_REFRESH_FAILED] %s", exc)
+        status = self.v1_profile.status()
+        calibration_text = "Ready" if status.valid else "Required"
+        if self._v1_profile_load_error:
+            calibration_text = "Required · profile load failed"
+        robot_status = self.robot_api.get_status()
+        game_panel.set_device_status(
+            camera=self.camera_state,
+            robot=(
+                f"Connected · {robot_status['state']}"
+                if robot_status["connected"]
+                else "Disconnected"
+            ),
+            calibration=calibration_text,
+        )
+
+    def v1_select_point(self, point_id_value: str) -> None:
+        try:
+            point = parse_point_id(point_id_value)
+            panel = self.control_panel.rapid_calibration_panel.drop_calibration_panel
+            panel.set_point_data(
+                self.v1_profile.above_record(point), self.v1_profile.drop_record(point)
+            )
+        except Exception as exc:
+            LOGGER.error("[V1][SELECT_FAILED] %s", exc)
+
+    def v1_generate_drop(self, point_id_value: str) -> None:
+        try:
+            record = self.v1_movel.generate_point(point_id_value, persist=True)
+            LOGGER.info(
+                "[V1][DROP_GENERATED] point=%s status=%s reason=%s",
+                record["point_id"],
+                record["status"],
+                record.get("reason") or "-",
+            )
+        except Exception as exc:
+            LOGGER.exception("[V1][DROP_GENERATE_FAILED] point=%s", point_id_value)
+            QMessageBox.critical(self, "Generate DROP failed", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_generate_all_drop(self) -> None:
+        panel = self.control_panel.rapid_calibration_panel.drop_calibration_panel
+        panel.generate_all_button.setEnabled(False)
+        try:
+            summary = self.v1_movel.generate_all(persist=True)
+            message = "\n".join(f"{key}: {value}" for key, value in summary.to_dict().items())
+            LOGGER.info("[V1][GENERATE_ALL_OFFLINE] %s", summary.to_dict())
+            QMessageBox.information(
+                self,
+                "Generate All DROP · OFFLINE VERIFIED",
+                message + "\n\nNo camera, serial command, or robot motion was used.",
+            )
+        except Exception as exc:
+            LOGGER.exception("[V1][GENERATE_ALL_FAILED]")
+            QMessageBox.critical(self, "Generate All DROP failed", str(exc))
+        finally:
+            panel.generate_all_button.setEnabled(True)
+            self._refresh_v1_ui()
+
+    def v1_preview_movel(self, point_id_value: str) -> None:
+        try:
+            preview = self.robot.preview_drop(point_id_value)
+            message = (
+                f"Point: {preview['point_id']}\n"
+                f"Status: {preview['status']}\n"
+                f"Descent waypoints: {len(preview['descent'])}\n"
+                f"Reverse waypoints: {len(preview['reverse_ascent'])}\n"
+                f"Hardware execution: NO\n"
+                f"Reason: {preview.get('reason') or '-'}"
+            )
+            QMessageBox.information(self, "MoveL Preview · OFFLINE", message)
+        except Exception as exc:
+            QMessageBox.warning(self, "MoveL Preview unavailable", str(exc))
+
+    def v1_move_above(self, point_id_value: str) -> bool:
+        try:
+            sequence = self.robot.move_to_above(point_id_value)
+        except Exception as exc:
+            QMessageBox.warning(self, "Move ABOVE blocked", str(exc))
+            return False
+        return self._v1_submit_calibration_sequence(
+            sequence,
+            title="Move ABOVE",
+            warning=f"Move to {point_id_value} ABOVE using the V1 profile.",
+        )
+
+    def v1_move_drop(self, point_id_value: str) -> None:
+        try:
+            sequence = self.robot.move_to_drop_for_calibration(point_id_value)
+        except Exception as exc:
+            QMessageBox.warning(self, "Move DROP blocked", str(exc))
+            return
+        self._v1_submit_calibration_sequence(
+            sequence,
+            title="Move DROP · verification",
+            warning=(
+                f"Empty-tool/pump-off MoveL descent for {point_id_value}. "
+                "Confirm the arm is already in a safe calibration state."
+            ),
+        )
+
+    def v1_retract(self, point_id_value: str) -> None:
+        try:
+            sequence = self.robot.retract(point_id_value)
+        except Exception as exc:
+            QMessageBox.warning(self, "Retract blocked", str(exc))
+            return
+        self._v1_submit_calibration_sequence(
+            sequence,
+            title="Retract",
+            warning=f"Retract {point_id_value} through the exact saved reverse path.",
+        )
+
+    def v1_test_full_place(self, point_id_value: str) -> None:
+        try:
+            sequence = self.robot.calibration_full_place_sequence(point_id_value)
+        except Exception as exc:
+            QMessageBox.warning(self, "Full place test blocked", str(exc))
+            return
+        self._v1_submit_calibration_sequence(
+            sequence,
+            title="Test Full Place",
+            warning=(
+                f"Run pick → carry-high → {point_id_value} ABOVE → MoveL DROP → "
+                "release → exact reverse ascent. This does not mark the point verified."
+            ),
+        )
+
+    def _v1_submit_calibration_sequence(
+        self, sequence: SequenceDefinition, *, title: str, warning: str
+    ) -> bool:
+        if not self.controller.is_connected:
+            QMessageBox.warning(self, title, "Serial is not connected (dry-run also requires the simulated connection).")
+            return False
+        if self.arm_worker.busy or self._is_estop_latched():
+            QMessageBox.warning(self, title, "Robot is busy or emergency stop is latched.")
+            return False
+        if not self.dry_run:
+            answer = QMessageBox.warning(
+                self,
+                title,
+                warning + "\n\nClear the work area and keep the physical cutoff ready.",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return False
+        if not self.arm_worker.submit(sequence):
+            QMessageBox.warning(self, title, "Arm worker rejected a concurrent action.")
+            return False
+        self._set_camera_arm_busy(True)
+        LOGGER.info(
+            "[V1][CAL_SEQUENCE_ACCEPTED] name=%s verification=%s",
+            sequence.name,
+            "DRY RUN" if self.dry_run else "HARDWARE VERIFICATION IN PROGRESS",
+        )
+        self._refresh_ui()
+        return True
+
+    def v1_save_drop_correction(self, point_id_value: str, correction: object) -> None:
+        try:
+            if not isinstance(correction, dict):
+                raise ProfileError("DROP correction must contain J0..J4")
+            self.v1_profile.save_drop_correction(point_id_value, correction)
+            self.v1_profile.save()
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Correction failed", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_capture_fast_anchor(
+        self, mode: str, point_id_value: str, pwm: object
+    ) -> None:
+        selected = str(mode).upper()
+        required = GOLDEN_FAST_5 if selected == "FAST_5" else FAST_9
+        try:
+            point = parse_point_id(point_id_value)
+            if point.as_tuple() not in required:
+                required_text = ", ".join(parse_point_id(coord).point_id for coord in required)
+                raise ProfileError(
+                    f"{point.point_id} is not a {selected} anchor. Required: {required_text}"
+                )
+            if not isinstance(pwm, dict):
+                raise ProfileError("Fast anchor PWM must contain J0..J4")
+            normalized = self.v1_profile._validate_pwm(pwm)
+            self._v1_fast_anchor_inputs[selected][point.as_tuple()] = normalized
+            LOGGER.info(
+                "[V1][FAST_ANCHOR_CAPTURED] mode=%s point=%s pwm=%s",
+                selected,
+                point.point_id,
+                normalized,
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Capture Fast Anchor failed", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_apply_fast_calibration(self, mode: str) -> None:
+        selected = str(mode).upper()
+        try:
+            result = self.v1_profile.apply_fast_calibration(
+                selected, self._v1_fast_anchor_inputs.get(selected, {})
+            )
+            self.v1_profile.save()
+            QMessageBox.information(
+                self,
+                "Fast Calibration applied",
+                f"Mode: {result['mode']}\nMethod: {result['method']}\n"
+                "Five Golden ABOVE anchors remain protected. Regenerate DROP offline next.",
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Fast Calibration blocked", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_save_direct_anchor(self, point_id_value: str, pwm: object) -> None:
+        try:
+            point = parse_point_id(point_id_value)
+            if not isinstance(pwm, dict):
+                raise ProfileError("Direct ABOVE PWM must contain J0..J4")
+            golden = golden_for(point.row, point.col)
+            if golden is not None:
+                answer = QMessageBox.warning(
+                    self,
+                    "Protected Golden ABOVE",
+                    f"{golden.legacy_id} is HARDWARE VERIFIED and protected. "
+                    "Create a pending revalidation request without changing the active value?",
+                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                    QMessageBox.StandardButton.No,
+                )
+                if answer != QMessageBox.StandardButton.Yes:
+                    return
+                self.v1_profile.request_golden_override(
+                    point,
+                    pwm,
+                    confirmation_note="explicit request from Advanced Calibration UI",
+                )
+            else:
+                self.v1_profile.save_direct_anchor(point, pwm)
+            self.v1_profile.save()
+        except Exception as exc:
+            QMessageBox.warning(self, "Save Direct Anchor failed", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_reset_drop_correction(self, point_id_value: str) -> None:
+        try:
+            self.v1_profile.reset_drop_correction(point_id_value)
+            self.v1_profile.save()
+        except Exception as exc:
+            QMessageBox.warning(self, "Reset Correction failed", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_mark_drop_verified(self, point_id_value: str) -> None:
+        normalized_point = parse_point_id(point_id_value).point_id
+        if not self.dry_run and normalized_point not in self._v1_live_tested_points:
+            QMessageBox.warning(
+                self,
+                "Hardware verification blocked",
+                "Complete the selected point's live DROP and exact saved Retract, "
+                "or a complete Full Place test, before marking HARDWARE VERIFIED.",
+            )
+            return
+        answer = QMessageBox.question(
+            self,
+            "Mark DROP Verified",
+            f"Confirm that {point_id_value} was checked at the scope shown by the current mode.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        hardware_confirmed = (
+            not self.dry_run and normalized_point in self._v1_live_tested_points
+        )
+        try:
+            self.v1_profile.mark_drop_verified(
+                point_id_value,
+                notes="explicit operator confirmation from DROP Calibration UI",
+                hardware_confirmed=hardware_confirmed,
+            )
+            self.v1_profile.save()
+        except Exception as exc:
+            QMessageBox.warning(self, "Mark Verified failed", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_save_profile(self) -> None:
+        try:
+            path = self.v1_profile.save()
+            QMessageBox.information(self, "Profile saved", str(path))
+        except Exception as exc:
+            QMessageBox.critical(self, "Profile save failed", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_promote_profile(self) -> None:
+        try:
+            path = self.v1_profile.promote_valid()
+            QMessageBox.information(
+                self,
+                "Calibration Ready",
+                f"Profile validated and saved:\n{path}\n\nFuture startup will route directly to Game.",
+            )
+            self.control_panel.rapid_calibration_panel.show_game()
+        except Exception as exc:
+            QMessageBox.warning(self, "Calibration not ready", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_export_golden_baseline(self) -> None:
+        answer = QMessageBox.question(
+            self,
+            "Save Golden Calibration Baseline",
+            "Create a new versioned baseline artifact from the current valid profile? "
+            "Existing baseline files will not be overwritten.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            path = self.v1_profile.export_golden_baseline()
+            QMessageBox.information(self, "Golden Baseline saved", str(path))
+        except Exception as exc:
+            QMessageBox.warning(self, "Golden Baseline blocked", str(exc))
+        self._refresh_v1_ui()
+
+    def v1_game_place(self, point_id_value: str) -> None:
+        result = self.robot_api.place_piece(point_id_value)
+        game = self.control_panel.rapid_calibration_panel.game_panel
+        if result != SUCCESS:
+            status = self.robot_api.get_status()
+            game.complete_robot_request(
+                False,
+                f"{result}: {status.get('error') or '-'}",
+            )
+            self._refresh_v1_ui()
+            return
+        self._set_camera_arm_busy(True)
+        if self.dry_run and self.robot.state.value == "IDLE":
+            game.complete_robot_request(
+                True,
+                "DRY RUN PASS; no hardware movement",
+                vision_confirmed=True,
+            )
+            self._set_camera_arm_busy(False)
+        self._refresh_ui()
 
     def connect_camera(self) -> None:
         if self.camera_worker is not None and self.camera_worker.isRunning():
@@ -312,6 +823,9 @@ class MainWindow(QMainWindow):
     def disconnect_serial(self) -> None:
         if self.arm_worker.busy:
             self.arm_worker.cancel_pending()
+        self.stage7.clear_pending_jogs()
+        self._stage7_parked_above = None
+        self._stage7_parked_pwm = None
         self.controller.disconnect()
         transition = self.state_machine.disconnect()
         self._log_transition(transition)
@@ -323,6 +837,9 @@ class MainWindow(QMainWindow):
     def start_return_to_observe(self) -> None:
         # From TARGET_ABOVE/HOVERING, never jump directly to OBSERVE.
         if self.state_machine.snapshot().state == ArmState.HOVERING:
+            if self._stage7_parked_above is not None:
+                self.stage7_safe_return()
+                return
             self.start_stage5_safe_return()
             return
         if not self.controller.is_connected:
@@ -331,7 +848,7 @@ class MainWindow(QMainWindow):
         if self.arm_worker.busy or self.state_machine.busy:
             QMessageBox.warning(self, "回观察位", "机械臂忙，请稍候或急停后恢复再试")
             return
-        if self.state_machine.snapshot().state == ArmState.ESTOP:
+        if self._is_estop_latched():
             QMessageBox.warning(self, "回观察位", "当前急停锁存：请先点「急停后恢复」，再回观察位")
             return
         if self.state_machine.state == ArmState.OBSERVE_HOLD:
@@ -400,8 +917,15 @@ class MainWindow(QMainWindow):
         self._start_sequence(sequence, lambda: self.state_machine.begin_manual(action_name))
 
     def _start_sequence(self, sequence: SequenceDefinition, begin) -> None:
+        if self._is_estop_latched():
+            QMessageBox.warning(
+                self,
+                "急停已锁存",
+                "请先确认机械臂和下位机已经安全复位，再点击“急停后恢复”。",
+            )
+            return
         if not self.controller.is_connected:
-            QMessageBox.warning(self, "未连接", "请先连接 COM（dry-run 中为模拟连接）。")
+            QMessageBox.warning(self, "未连接", "请先选择端口并连接 COM。")
             return
         if self.arm_worker.busy:
             QMessageBox.warning(self, "动作忙", "已有机械臂动作正在执行。")
@@ -424,10 +948,14 @@ class MainWindow(QMainWindow):
 
     def emergency_stop(self) -> None:
         self.arm_worker.cancel_pending()
+        self.stage7.clear_pending_jogs()
+        self._stage7_parked_above = None
+        self._stage7_parked_pwm = None
         try:
-            self.controller.emergency_stop()
+            self.robot.emergency_stop()
         except Exception as exc:
             LOGGER.error("ESTOP WRITE FAILED: %s", exc)
+        self._v1_live_drop_pending_retract.clear()
         transition = self.state_machine.estop()
         self._log_transition(transition)
         self.stage5.estop()
@@ -483,6 +1011,79 @@ class MainWindow(QMainWindow):
         self._refresh_ui(current_action=step_name)
 
     def _on_sequence_finished(self, name: str, success: bool, message: str) -> None:
+        if name.startswith("V1_"):
+            point_text = name.split(":", 1)[1] if ":" in name else ""
+            if not self.dry_run and point_text:
+                try:
+                    verified_point = parse_point_id(point_text).point_id
+                    if not success:
+                        self._v1_live_drop_pending_retract.discard(verified_point)
+                    elif name.startswith("V1_CAL_MOVE_DROP:"):
+                        # Reaching DROP is only half of a safe point test. The
+                        # point becomes eligible for human verification after
+                        # the exact saved retract also finishes successfully.
+                        self._v1_live_drop_pending_retract.add(verified_point)
+                    elif name.startswith("V1_RETRACT:"):
+                        if verified_point in self._v1_live_drop_pending_retract:
+                            self._v1_live_drop_pending_retract.discard(verified_point)
+                            self._v1_live_tested_points.add(verified_point)
+                    elif name.startswith("V1_CAL_FULL_PLACE:"):
+                        self._v1_live_drop_pending_retract.discard(verified_point)
+                        self._v1_live_tested_points.add(verified_point)
+                except Exception:
+                    LOGGER.warning("[V1][TEST_POINT_PARSE_FAILED] name=%s", name)
+            if name.startswith("V1_PLACE:"):
+                self.control_panel.rapid_calibration_panel.game_panel.complete_robot_request(
+                    success,
+                    message or ("HARDWARE MOTION FINISHED; VISION VERIFY REQUIRED" if success else "failed"),
+                    vision_confirmed=self.dry_run,
+                )
+            self._set_camera_arm_busy(False)
+            if success and self.camera_worker is not None:
+                self.camera_worker.request_relocalize()
+                if name.startswith(("V1_PLACE:", "V1_CAL_FULL_PLACE:")):
+                    self.piece_status = "PENDING"
+                    self.camera_worker.request_piece_recognition()
+            LOGGER.info(
+                "[V1][SEQUENCE_FINISHED] name=%s success=%s evidence=%s message=%s",
+                name,
+                success,
+                "DRY RUN PASS" if self.dry_run and success else "HARDWARE VERIFICATION REQUIRED",
+                message or "-",
+            )
+            self._refresh_v1_ui()
+            self._refresh_ui()
+            return
+        if name == "STAGE7_MOVE_ABOVE":
+            point = self._stage7_active_move_point
+            if success and point is not None:
+                self._log_transition(self.state_machine.complete_stage7_hover())
+                self._stage7_live_tested_points.add(point)
+                self._stage7_parked_above = point
+                self._stage7_parked_pwm = dict(self._stage7_active_move_pwm or {})
+                LOGGER.info("[STAGE7][ABOVE_LIVE_TESTED] point=%s", point_id(*point))
+            else:
+                self._log_transition(
+                    self.state_machine.fail(message or "Stage 7 Move ABOVE failed")
+                )
+            self._stage7_active_move_point = None
+            self._stage7_active_move_pwm = None
+            self._set_camera_arm_busy(success)
+            self._refresh_stage7_ui()
+            self._refresh_ui()
+            return
+        if name == "STAGE7_SAFE_RETURN":
+            if success:
+                self._log_transition(self.state_machine.complete_stage7_return())
+            else:
+                self._log_transition(
+                    self.state_machine.fail(message or "Stage 7 safe return failed")
+                )
+            self._stage7_parked_above = None
+            self._stage7_parked_pwm = None
+            self._set_camera_arm_busy(False)
+            self._refresh_ui()
+            return
         if name in {"CROSS_REVERIFY_TOUR", "BOARD_HOVER_TOUR"}:
             self._finish_hover_tour(name, success=success, message=message)
             return
@@ -608,6 +1209,9 @@ class MainWindow(QMainWindow):
     def _on_piece_status(self, summary: str, board_matrix: object) -> None:
         self.piece_status = summary
         LOGGER.info("PIECE MATRIX %s", board_matrix)
+        self.control_panel.rapid_calibration_panel.game_panel.apply_vision_matrix(
+            board_matrix
+        )
         self._refresh_ui()
 
     def _on_camera_finished(self) -> None:
@@ -658,11 +1262,14 @@ class MainWindow(QMainWindow):
             busy=snapshot.busy or self.arm_worker.busy,
             board_locked=self.board_locked,
             target_visible=self.target_visible,
+            estop_latched=self._is_estop_latched(),
         )
         # Always re-pull Stage5 context from the live main system and push to the panel.
         # Without this, Stage5 can be READY internally while the UI stays DISCONNECTED.
         self._sync_stage5_context(reason="refresh_ui")
         self._refresh_stage5_ui()
+        self._refresh_stage7_ui()
+        self._refresh_v1_ui()
 
 
     def _on_board_geometry(self, payload: object) -> None:
@@ -946,11 +1553,37 @@ class MainWindow(QMainWindow):
 
     def stage5_recover(self) -> None:
         try:
-            # User must manually re-arm after ESTOP.
-            if self.state_machine.snapshot().state == ArmState.ESTOP:
-                # Keep arm ESTOP until user uses existing flow (return observe after reconnect).
-                pass
-            self.stage5.recover()
+            if not self.controller.is_connected:
+                raise RuntimeError("请先复位下位机并重新连接 COM")
+            if self.arm_worker.busy or self.state_machine.busy:
+                raise RuntimeError("机械臂仍忙，不能恢复")
+            stage5_latched = (
+                self.stage5.stage_state.snapshot().state
+                == Stage5State.EMERGENCY_STOP
+            )
+            arm_latched = self.state_machine.snapshot().state in {
+                ArmState.ESTOP,
+                ArmState.ERROR,
+            }
+            robot_latched = self.robot.state in {RobotState.STOPPED, RobotState.ERROR}
+            if not stage5_latched and not arm_latched and not robot_latched:
+                raise RuntimeError("当前没有需要恢复的急停/错误锁存")
+            answer = QMessageBox.warning(
+                self,
+                "急停后恢复确认",
+                "仅在机械臂已停止、下位机已复位、工作区已清空后继续。\n"
+                "恢复后状态为 UNKNOWN，必须再执行“回观察位”。",
+                QMessageBox.StandardButton.Ok | QMessageBox.StandardButton.Cancel,
+                QMessageBox.StandardButton.Cancel,
+            )
+            if answer != QMessageBox.StandardButton.Ok:
+                return
+            if stage5_latched:
+                self.stage5.recover()
+            if arm_latched:
+                self._log_transition(self.state_machine.recover_from_estop())
+            if robot_latched:
+                self.robot.recover()
             self._sync_stage5_context(reason="recover")
             if self.camera_worker is not None:
                 self.camera_worker.set_selected_target(None, None)
@@ -959,6 +1592,14 @@ class MainWindow(QMainWindow):
             self._refresh_ui()
         except Exception as exc:
             QMessageBox.warning(self, "恢复", str(exc))
+
+    def _is_estop_latched(self) -> bool:
+        return (
+            self.state_machine.snapshot().state == ArmState.ESTOP
+            or self.stage5.stage_state.snapshot().state
+            == Stage5State.EMERGENCY_STOP
+            or self.robot.state == RobotState.STOPPED
+        )
 
 
 
@@ -1952,6 +2593,536 @@ class MainWindow(QMainWindow):
             estop=snap.state == Stage5State.EMERGENCY_STOP or arm.state == ArmState.ESTOP,
         )
 
+    # ------------------------------------------------------------------ Stage 7
+    def stage7_load_baseline(self) -> None:
+        try:
+            baseline = self.stage7.reload_baseline()
+            LOGGER.info(
+                "[STAGE7][BASELINE] path=%s sha=%s points=%d direct=%d",
+                baseline.path,
+                baseline.source_sha256,
+                baseline.board_size**2,
+                baseline.direct_count,
+            )
+            self._refresh_stage7_ui(push_pwm=True)
+        except Exception as exc:
+            self._stage7_error("Load Baseline failed", exc)
+
+    def stage7_select_pick_pose(self, pose_name: str) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        try:
+            record = self.stage7.pick_poses.get(pose_name)
+            panel.set_pwm_values(record["new_pwm"])
+            panel.pick_pose_status.setText(
+                f"{record['source']} · OFFLINE / NOT HARDWARE VERIFIED"
+            )
+            LOGGER.info(
+                "[STAGE7][PICK_POSE_SELECTED] pose=%s source=%s",
+                pose_name,
+                record["source"],
+            )
+        except Exception as exc:
+            self._stage7_error("Select pick pose failed", exc)
+
+    def stage7_save_pick_pose(self, pose_name: str) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        try:
+            session_id = None if self.stage7.session is None else self.stage7.session.session_id
+            record = self.stage7.pick_poses.save_candidate(
+                pose_name,
+                panel.pwm_values(),
+                calibration_session=session_id,
+            )
+            panel.pick_pose_status.setText(
+                "DIRECT_CANDIDATE saved · OFFLINE / NOT HARDWARE VERIFIED"
+            )
+            panel.workflow_label.setText(
+                f"Saved {pose_name} candidate · stable action table unchanged"
+            )
+            LOGGER.info(
+                "[STAGE7][PICK_POSE_SAVED] pose=%s delta=%s verified=0 path=%s",
+                pose_name,
+                record["delta_pwm"],
+                self.stage7.settings.pick_pose_path,
+            )
+        except Exception as exc:
+            self._stage7_error("Save pick pose failed", exc)
+
+    def stage7_new_session(self, mode: str) -> None:
+        try:
+            session = self.stage7.new_session(CalibrationMode(mode))
+            self._stage7_live_tested_points.clear()
+            first = session.required_coordinates[0]
+            panel = self.control_panel.rapid_calibration_panel
+            panel.select_point(*first, emit=False)
+            self.stage7_select_point(*first)
+            LOGGER.info(
+                "[STAGE7][GUI_SESSION] id=%s mode=%s",
+                session.session_id,
+                session.mode.value,
+            )
+        except Exception as exc:
+            self._stage7_error("New Calibration Session failed", exc)
+
+    def stage7_select_point(self, row: int, col: int) -> None:
+        try:
+            self._stage7_preview_token += 1
+            panel = self.control_panel.rapid_calibration_panel
+            panel.set_pwm_values(self.stage7.point_pwm(row, col))
+            records = self._stage7_grid_records()
+            panel.update_grid(records)
+            panel.set_point_record(records.get(point_id(row, col)))
+            if self.camera_worker is not None:
+                self.camera_worker.set_selected_target(row, col)
+            self.camera_panel.set_target_text(f"标定目标: {point_id(row, col)} ABOVE")
+            LOGGER.info("[STAGE7][POINT_SELECTED] point=%s", point_id(row, col))
+        except Exception as exc:
+            self._stage7_error("Select Stage 7 point failed", exc)
+
+    def stage7_move_above(self) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        row, col = panel.current_point
+        try:
+            if self.arm_worker.busy or self.state_machine.busy:
+                raise RuntimeError("arm is busy")
+            if self._is_estop_latched():
+                raise RuntimeError("ESTOP is latched")
+            if self.stage7.session is None and not (
+                self.stage7.dry_run or self.controller.dry_run
+            ):
+                raise RuntimeError("create a calibration session before live movement")
+            holding = False
+            pwm = panel.pwm_values()
+            spatial_values = [int(pwm[f"{joint:03d}"]) for joint in range(5)]
+            if len(set(spatial_values)) == 1:
+                raise RuntimeError(
+                    "safety guard: J0..J4 have the same target PWM "
+                    f"({spatial_values[0]}); possible uninitialized editor"
+                )
+            rail_hits = [
+                f"J{joint}={spatial_values[joint]}"
+                for joint in range(5)
+                if spatial_values[joint]
+                in {
+                    int(self.stage7.limits.joint_min[joint]),
+                    int(self.stage7.limits.joint_max[joint]),
+                }
+            ]
+            if rail_hits:
+                raise RuntimeError(
+                    "safety guard: target touches configured joint limit: "
+                    + ", ".join(rail_hits)
+                )
+            plan = self.stage5.planner.plan_hover_with_pwm(
+                row,
+                col,
+                pwm,
+                holding_piece=holding,
+                dry_run=self.stage7.dry_run or self.controller.dry_run,
+                source="stage7_candidate",
+            )
+            if self.stage7.dry_run or self.controller.dry_run:
+                for label, command in plan.serial_commands:
+                    LOGGER.info("[STAGE7][DRY_RUN_TX] %s %s", label, command)
+                self._flash_stage7_dry_run_target(row, col)
+                panel.set_live_status(
+                    f"DRY RUN · {point_id(row, col)} · SIMULATED / NOT SENT"
+                )
+                panel.workflow_label.setText(
+                    f"DRY RUN preview {point_id(row, col)} · target flashing · "
+                    f"{len(plan.serial_commands)} commands · NOT SENT"
+                )
+                return
+            if not self.controller.is_connected:
+                raise RuntimeError("serial is not connected")
+            if self.state_machine.snapshot().state != ArmState.OBSERVE_IDLE:
+                raise RuntimeError(
+                    "Move ABOVE must start from OBSERVE_IDLE with pump off; return to observe first"
+                )
+            sequence = SequenceDefinition(
+                name="STAGE7_MOVE_ABOVE",
+                display_name=f"Stage 7 Move ABOVE {point_id(row, col)}",
+                requires_board=False,
+                steps=plan.sequence.steps,
+            )
+            sequence = self._prepare_stage7_above_sequence(sequence)
+            self._stage7_active_move_point = (row, col)
+            self._stage7_active_move_pwm = dict(pwm)
+            self._start_sequence(
+                sequence,
+                self.state_machine.begin_stage7_hover,
+            )
+            LOGGER.info(
+                "[STAGE7][MOVE_ABOVE] point=%s pwm=%s commands=%s",
+                point_id(row, col),
+                pwm,
+                plan.serial_commands,
+            )
+        except Exception as exc:
+            self._stage7_active_move_point = None
+            self._stage7_active_move_pwm = None
+            self._stage7_error("Move ABOVE blocked", exc)
+
+    def _prepare_stage7_above_sequence(
+        self, sequence: SequenceDefinition
+    ) -> SequenceDefinition:
+        """Hook for a deployment-specific high/ABOVE joint-order policy."""
+        return sequence
+
+    def _flash_stage7_dry_run_target(self, row: int, col: int) -> None:
+        """Flash the selected board intersection as explicit simulated motion."""
+        panel = self.control_panel.rapid_calibration_panel
+        panel.flash_point(row, col)
+        self._stage7_preview_token += 1
+        token = self._stage7_preview_token
+        self.camera_panel.set_target_text(
+            f"DRY RUN 模拟: {point_id(row, col)} ABOVE · NOT SENT"
+        )
+
+        def set_marker(visible: bool, *, final: bool = False) -> None:
+            if token != self._stage7_preview_token:
+                return
+            worker = self.camera_worker
+            if worker is not None:
+                worker.set_selected_target(row, col) if visible else worker.set_selected_target(None, None)
+            if final:
+                self.camera_panel.set_target_text(
+                    f"DRY RUN 目标: {point_id(row, col)} ABOVE · NOT SENT"
+                )
+
+        for step in range(8):
+            QTimer.singleShot(
+                step * 180,
+                lambda visible=(step % 2 == 0): set_marker(visible),
+            )
+        QTimer.singleShot(8 * 180, lambda: set_marker(True, final=True))
+
+    def stage7_jog(self, joint_id: int, delta: int) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        jid = int(joint_id)
+        requested = panel.joint_pwm(jid) + int(delta)
+        lo = int(self.stage7.limits.joint_min[jid])
+        hi = int(self.stage7.limits.joint_max[jid])
+        applied = max(lo, min(hi, requested))
+        panel.set_joint_pwm(jid, applied)
+
+        if self.stage7.session is None:
+            panel.set_live_status("NO SESSION / NOT SENT")
+            LOGGER.warning("[STAGE7][JOG_NOT_SENT] reason=NO_SESSION joint=%03d", jid)
+            return
+        if self._is_estop_latched():
+            panel.set_live_status("ESTOP / NOT SENT")
+            LOGGER.warning("[STAGE7][JOG_NOT_SENT] reason=ESTOP joint=%03d", jid)
+            return
+        if self.arm_worker.busy or self.state_machine.busy:
+            panel.set_live_status("ARM BUSY / NOT SENT")
+            LOGGER.warning("[STAGE7][JOG_NOT_SENT] reason=ARM_BUSY joint=%03d", jid)
+            return
+        row, col = panel.current_point
+        if not (self.stage7.dry_run or self.controller.dry_run) and self.controller.is_connected:
+            if self._stage7_parked_above != (row, col):
+                panel.set_live_status("MOVE ABOVE FIRST / NOT SENT")
+                LOGGER.warning(
+                    "[STAGE7][JOG_NOT_SENT] reason=NOT_AT_SELECTED_ABOVE point=%s joint=%03d",
+                    point_id(row, col),
+                    jid,
+                )
+                return
+        try:
+            result = self.stage7.queue_live_jog(jid, requested)
+            panel.set_joint_pwm(jid, result.applied_pwm)
+            panel.set_live_status(result.status)
+            if result.applied_pwm != requested:
+                panel.workflow_label.setText(
+                    f"J{jid} requested {requested}, clamped to {result.applied_pwm}"
+                )
+        except Exception as exc:
+            self._stage7_error("Live joint jog blocked", exc)
+
+    def stage7_apply_joint(self, joint_id: int, pwm: int, time_ms: int) -> None:
+        """Apply one absolute editor value; editing alone never reaches here."""
+        panel = self.control_panel.rapid_calibration_panel
+        jid = int(joint_id)
+        try:
+            if jid not in range(5):
+                raise ValueError("only spatial joints J0..J4 are editable; J5 is the pump")
+            if self.stage7.session is None:
+                raise RuntimeError("create a calibration session first")
+            lo = int(self.stage7.limits.joint_min[jid])
+            hi = int(self.stage7.limits.joint_max[jid])
+            requested = int(pwm)
+            applied = max(lo, min(hi, requested))
+            panel.set_joint_pwm(jid, applied)
+            if self._is_estop_latched():
+                raise RuntimeError("ESTOP is latched")
+            if self.arm_worker.busy or self.state_machine.busy:
+                raise RuntimeError("arm is busy")
+            row, col = panel.current_point
+            if not (self.stage7.dry_run or self.controller.dry_run):
+                if not self.controller.is_connected:
+                    raise RuntimeError("serial is not connected")
+                if self._stage7_parked_above != (row, col):
+                    raise RuntimeError("Move ABOVE the selected point before Apply")
+            result = self.stage7.queue_live_jog(jid, applied, time_ms=int(time_ms))
+            panel.set_live_status(result.status)
+            if requested != applied:
+                panel.workflow_label.setText(
+                    f"OUT OF RANGE · J{jid} {requested} clamped to {applied}"
+                )
+            else:
+                panel.workflow_label.setText(
+                    f"J{jid} absolute {applied} · {time_ms} ms · {result.status}"
+                )
+            LOGGER.info(
+                "[STAGE7][APPLY_JOINT] joint=%03d requested=%d applied=%d time_ms=%d status=%s",
+                jid,
+                requested,
+                applied,
+                int(time_ms),
+                result.status,
+            )
+        except Exception as exc:
+            panel.set_live_status("NOT SENT")
+            self._stage7_error("Apply joint blocked", exc)
+
+    def stage7_apply_all(self, pwm: object, time_ms: int) -> None:
+        """Apply one complete spatial pose without touching the pump."""
+        panel = self.control_panel.rapid_calibration_panel
+        try:
+            if not isinstance(pwm, dict):
+                raise TypeError("PWM pose must be a mapping")
+            if self.stage7.session is None:
+                raise RuntimeError("create a calibration session first")
+            if self._is_estop_latched():
+                raise RuntimeError("ESTOP is latched")
+            if self.arm_worker.busy or self.state_machine.busy:
+                raise RuntimeError("arm is busy")
+            applied: dict[str, int] = {}
+            clamps: list[str] = []
+            for jid in range(5):
+                key = f"{jid:03d}"
+                requested = int(pwm[key])
+                lo = int(self.stage7.limits.joint_min[jid])
+                hi = int(self.stage7.limits.joint_max[jid])
+                value = max(lo, min(hi, requested))
+                applied[key] = value
+                if value != requested:
+                    clamps.append(f"J{jid} {requested}->{value}")
+            panel.set_pwm_values(applied)
+            row, col = panel.current_point
+            if self.stage7.dry_run or self.controller.dry_run:
+                panel.set_live_status("DRY RUN / NOT SENT")
+                panel.workflow_label.setText(
+                    f"Apply All preview · {time_ms} ms · NOT SENT"
+                    + (f" · OUT OF RANGE: {', '.join(clamps)}" if clamps else "")
+                )
+                LOGGER.info(
+                    "[STAGE7][APPLY_ALL_DRY_RUN] point=%s pwm=%s time_ms=%d",
+                    point_id(row, col),
+                    applied,
+                    int(time_ms),
+                )
+                return
+            if not self.controller.is_connected:
+                raise RuntimeError("serial is not connected")
+            if self._stage7_parked_above != (row, col):
+                raise RuntimeError("Move ABOVE the selected point before Apply All")
+            command = self.controller.send_spatial_pose(applied, time_ms=int(time_ms))
+            self._stage7_parked_pwm = dict(applied)
+            panel.set_live_status("SENT")
+            panel.workflow_label.setText(
+                f"Apply All sent · J0–J4 · {time_ms} ms"
+                + (f" · OUT OF RANGE: {', '.join(clamps)}" if clamps else "")
+            )
+            LOGGER.info(
+                "[STAGE7][APPLY_ALL] point=%s pwm=%s time_ms=%d command=%s",
+                point_id(row, col),
+                applied,
+                int(time_ms),
+                command,
+            )
+        except Exception as exc:
+            panel.set_live_status("NOT SENT")
+            self._stage7_error("Apply All blocked", exc)
+
+    def stage7_safe_return(self) -> None:
+        try:
+            if self._stage7_parked_above is None:
+                raise RuntimeError("Stage 7 is not parked at an ABOVE point")
+            self.stage7.clear_pending_jogs()
+            row, col = self._stage7_parked_above
+            pwm = self._stage7_parked_pwm
+            if pwm is None:
+                raise RuntimeError("Stage 7 parked PWM snapshot is missing")
+            planned = self.stage5.planner.plan_return_to_observe(
+                holding_piece=False,
+                dry_run=False,
+                reference_001=int(pwm["001"]),
+            )
+            sequence = SequenceDefinition(
+                name="STAGE7_SAFE_RETURN",
+                display_name=f"Stage 7 Safe Return from {point_id(row, col)}",
+                steps=planned.steps,
+            )
+            self._start_sequence(sequence, self.state_machine.begin_stage7_return)
+            LOGGER.info(
+                "[STAGE7][SAFE_RETURN] point=%s actions=%s",
+                point_id(row, col),
+                sequence.action_names,
+            )
+        except Exception as exc:
+            self._stage7_error("Stage 7 safe return blocked", exc)
+
+    def _flush_stage7_jog(self) -> None:
+        try:
+            result = self.stage7.flush_one_jog()
+            if result is not None:
+                if result.sent and self._stage7_parked_pwm is not None:
+                    self._stage7_parked_pwm[f"{result.joint_id:03d}"] = result.applied_pwm
+                self.control_panel.rapid_calibration_panel.set_live_status(result.status)
+        except Exception as exc:
+            self.stage7.clear_pending_jogs()
+            LOGGER.error("[STAGE7][JOG_SEND_FAILED] %s", exc)
+            self.control_panel.rapid_calibration_panel.set_live_status(
+                "SERIAL ERROR / NOT SENT"
+            )
+
+    def stage7_save_anchor(self) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        row, col = panel.current_point
+        try:
+            anchor = self.stage7.save_anchor(row, col, panel.pwm_values())
+            panel.set_pwm_values(anchor["new_pwm"])
+            if anchor["clamped"]:
+                panel.workflow_label.setText(
+                    f"Saved {anchor['point_id']} with clamp: {anchor['clamp_log']}"
+                )
+            else:
+                panel.workflow_label.setText(
+                    f"Saved {anchor['point_id']} DIRECT · click Recalculate 225"
+                )
+            self._refresh_stage7_ui()
+        except Exception as exc:
+            self._stage7_error("Save Anchor failed", exc)
+
+    def stage7_recalculate(self) -> None:
+        try:
+            result = self.stage7.recalculate()
+            self._stage7_live_tested_points.clear()
+            self.control_panel.rapid_calibration_panel.workflow_label.setText(
+                f"Generated {len(result)} candidate ABOVE poses · verification required"
+            )
+            self._refresh_stage7_ui(push_pwm=True)
+        except Exception as exc:
+            self._stage7_error("Recalculate 225 failed", exc)
+
+    def stage7_verify(self) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        row, col = panel.current_point
+        try:
+            if self.stage7.dry_run or self.controller.dry_run:
+                raise RuntimeError("DRY RUN cannot create real-world VERIFIED provenance")
+            if not self.controller.is_connected:
+                raise RuntimeError("real serial connection is required for verification")
+            if (row, col) not in self._stage7_live_tested_points:
+                raise RuntimeError("Move ABOVE this point successfully before Verify")
+            record = self.stage7.verify(row, col)
+            panel.workflow_label.setText(f"Verified {record['point_id']}")
+            self._refresh_stage7_ui()
+            if panel.continuous_button.isChecked():
+                panel.select_next_point()
+        except Exception as exc:
+            self._stage7_error("Verify Point blocked", exc)
+
+    def stage7_commit(self) -> None:
+        try:
+            session = self.stage7.require_session()
+            if not session.verified_points:
+                raise RuntimeError("verify at least one generated point before Commit")
+            answer = QMessageBox.question(
+                self,
+                "Commit Stage 7 Calibration",
+                f"Commit candidate revision {session.candidate_revision} as current deployment?\n"
+                "The stable Stage 5 baseline will remain unchanged.",
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            path = self.stage7.commit()
+            LOGGER.info("[STAGE7][COMMIT] path=%s", path)
+            self.control_panel.rapid_calibration_panel.workflow_label.setText(
+                f"Committed: {path}"
+            )
+            self._refresh_stage7_ui()
+        except Exception as exc:
+            self._stage7_error("Commit Calibration blocked", exc)
+
+    def stage7_rollback(self) -> None:
+        try:
+            answer = QMessageBox.warning(
+                self,
+                "Rollback deployment to baseline",
+                "Write the stable 225-point baseline as the current Stage 7 deployment?\n"
+                "Session anchors/history will be retained.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                return
+            path = self.stage7.rollback()
+            self._stage7_live_tested_points.clear()
+            LOGGER.warning("[STAGE7][ROLLBACK] path=%s", path)
+            self.control_panel.rapid_calibration_panel.workflow_label.setText(
+                f"Rolled back current deployment to baseline: {path}"
+            )
+            self._refresh_stage7_ui(push_pwm=True)
+        except Exception as exc:
+            self._stage7_error("Rollback failed", exc)
+
+    def _stage7_grid_records(self) -> dict[str, dict]:
+        session = self.stage7.session
+        if session is None:
+            return {}
+        records = {key: dict(value) for key, value in session.generated_points.items()}
+        for key, anchor in session.anchors.items():
+            records[key] = {
+                **anchor,
+                "verified": key in session.verified_points,
+            }
+        return records
+
+    def _refresh_stage7_ui(self, *, push_pwm: bool = False) -> None:
+        panel = self.control_panel.rapid_calibration_panel
+        baseline = self.stage7.baseline
+        panel.set_baseline_info(
+            sha256=baseline.source_sha256,
+            direct_count=baseline.direct_count,
+        )
+        session = self.stage7.session
+        if session is None:
+            panel.set_session_info(session_id=None)
+        else:
+            panel.set_session_info(
+                session_id=session.session_id,
+                mode=session.mode.value,
+                anchor_count=len(session.anchors),
+                revision=session.candidate_revision,
+                stale=session.candidate_stale,
+                missing=session.missing_required,
+            )
+        records = self._stage7_grid_records()
+        panel.update_grid(records)
+        row, col = panel.current_point
+        panel.set_point_record(records.get(point_id(row, col)))
+        if push_pwm:
+            panel.set_pwm_values(self.stage7.point_pwm(row, col))
+        if self.stage7.pending_jog_count == 0:
+            panel.set_live_status(self.stage7.live_status)
+        panel.set_busy(self.arm_worker.busy or self.state_machine.busy)
+
+    def _stage7_error(self, title: str, exc: Exception) -> None:
+        LOGGER.warning("[STAGE7][GUI_BLOCKED] %s: %s", title, exc)
+        QMessageBox.warning(self, title, str(exc))
+
     def stage6_generate_current(self, row: int, col: int) -> None:
         try:
             self.stage6.generate_descent_profile(row, col)
@@ -2186,6 +3357,8 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event: QCloseEvent) -> None:  # noqa: N802 - Qt API
         self.stage6_thermal_timer.stop()
+        self.stage7_jog_timer.stop()
+        self.stage7.clear_pending_jogs()
         if self.arm_worker.busy and self.controller.is_connected:
             self.arm_worker.cancel_pending()
             try:
